@@ -154,7 +154,6 @@ function Build-HTMLContent {
         }
         # Use the cached Get-UserInfo function
         $userInfo = Get-UserInfo -SamAccountName $userKey
-        # Fixed the column order to match the HTML table header
         $topUsersHtml += "<tr>
         <td class='highlight' title='$($userInfo.Office)'>$crownIcon $($userInfo.DisplayName)</td>
         <td>$($userData.TotalJobs)</td>
@@ -178,15 +177,14 @@ function Build-HTMLContent {
         $printerNameOnly = $parts[1] # Assuming key is server:::printer
         $serverNameOnly = $parts[0]
         
-        # FIX 1: Uppercase the printer names (BSPR)
-        # Convert the printer name to uppercase if it starts with bspr
-        $displayPrinterName = if ($printerNameOnly -match '^(bspr)') {
+        
+        # Convert the printer name to uppercase if it starts with HP
+        $displayPrinterName = if ($printerNameOnly -match '^(HP)') {
             $printerNameOnly.ToUpper()
         } else {
             $printerNameOnly
         }
         
-        # Fixed the column order to match the HTML table header
         $topPrintersHtml += "<tr>
         <td class='highlight'>$displayPrinterName $crownIcon</td>
         <td>$($printerData.TotalJobs)</td>
@@ -220,7 +218,6 @@ function Build-HTMLContent {
             # Use cached Get-UserInfo
             $userInfo = Get-UserInfo -SamAccountName $job.User
             
-            # FIX 2: Truncate document name to 40 characters with ellipsis
             $documentName = $job.Document
             if ($documentName.Length -gt 40) {
                 $documentName = $documentName.Substring(0, 37) + "..."
@@ -230,14 +227,12 @@ function Build-HTMLContent {
                 $documentTooltip = ""
             }
             
-            # FIX 1: Uppercase printer names for main table too
             $displayPrinterName = if ($job.Printer -match '^(bspr)') {
                 $job.Printer.ToUpper()
             } else {
                 $job.Printer
             }
             
-            # Fixed column order to match HTML table header
             $printJobsHtml += "<tr>
                 <td>$($job.Time)</td>
                 <td title='$($userInfo.Office)'>$($userInfo.DisplayName)</td>
