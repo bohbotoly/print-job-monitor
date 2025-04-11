@@ -3,7 +3,7 @@ Import-Module ActiveDirectory
 # Configuration: List of servers to monitor
 $serverConfigs = @(
     @{
-        ServerName = "172.2.0.99" # Changed to your print server
+        ServerName = "localhost" # Changed to your print server
         Description = "Server Description" # Changed description
 		
 		#You can add more print servers
