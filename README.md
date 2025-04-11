@@ -23,7 +23,6 @@ A PowerShell-based solution for monitoring print jobs across one or multiple pri
 
 ## Files
 
-- `MonitorPrintJobs.bat` - Bat to Run the Script
 - `MonitorPrintJobs.ps1` - Main PowerShell script
 - `template.html` - HTML dashboard template
 
@@ -57,7 +56,13 @@ For local testing, you can use `"localhost"` as the ServerName.
 
 ### Starting the Monitor
 
-Run the script with administrative privileges:
+The easiest way to start the monitor is using the included batch file:
+
+```
+monitor_printer_jobs.bat
+```
+
+Alternatively, you can run the script directly with administrative privileges:
 
 ```powershell
 .\MonitorPrintJobs.ps1
@@ -145,9 +150,9 @@ $maxThreads = [number of servers] + 1
 
 ## License
 
-[Your License Here]
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ## Author
 
-[Your Name/Organization]
+Developed by bohbotoly (2025)
 
