@@ -48,7 +48,7 @@ echo [INFO] Starting monitoring script at %time%
 echo [INFO] Press CTRL+C to stop the monitoring service
 
 :: Run the PowerShell script with appropriate parameters
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0print-job-monitor.ps1.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0print-job-monitor.ps1"
 
 :: If the script exits, restart it automatically
 echo.
