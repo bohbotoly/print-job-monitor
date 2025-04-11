@@ -26,7 +26,7 @@ Before you begin, ensure you have:
 
 ### 2. Configure the Script
 
-1. Open `MonitorPrintJobs.ps1` in a text editor (PowerShell ISE, VS Code, Notepad++, etc.)
+1. Open `print-job-monitor.ps1` in a text editor (PowerShell ISE, VS Code, Notepad++, etc.)
 
 2. Locate and modify the server configuration section at the beginning of the script:
    ```powershell
@@ -84,17 +84,26 @@ Before you begin, ensure you have:
 ### 6. Run the Script
 
 1. Navigate to your installation directory:
-   ```powershell
+   ```
    cd C:\PrintMonitor
    ```
 
-2. Run the script with administrative privileges:
-   ```powershell
-   .\MonitorPrintJobs.ps1
+2. Run the included batch file with administrative privileges (right-click and select "Run as administrator"):
    ```
+   print-job-monitor.bat
+   ```
+
+   This batch file should be located in the same folder as your PowerShell script and HTML template.
 
 3. The script will start monitoring and provide output in the console:
    ```
+   ╔════════════════════════════════════════════════════════╗
+   ║                                                        ║
+   ║           Print Job Monitoring System v4.3             ║
+   ║                   by bohbotoly                         ║
+   ║                                                        ║
+   ╚════════════════════════════════════════════════════════╝
+
    Monitoring Servers:
    - your-print-server (Main Print Server)
    Output Directory: C:\PrintMonitor
@@ -106,6 +115,8 @@ Before you begin, ensure you have:
    Successfully initiated monitoring for your-print-server.
    Monitoring started. Press Ctrl+C to stop.
    ```
+
+   The batch file will automatically restart the monitoring script if it terminates for any reason.
 
 ### 7. Access the Dashboard
 
@@ -151,7 +162,7 @@ For continuous monitoring, you can set up the script as a scheduled task:
    - If the task fails, restart every: 1 minute
    - Attempt to restart up to: 3 times
 
-## Setting Up as a Windows Service (Advanced)
+## Setting Up as a Windows Service
 
 For even more reliable operation, you can set up the script as a Windows Service using NSSM (Non-Sucking Service Manager):
 
@@ -163,13 +174,13 @@ For even more reliable operation, you can set up the script as a Windows Service
 
 4. Install the service:
    ```cmd
-   nssm.exe install PrintJobMonitor
+   nssm.exe install print-job-monitor
    ```
 
 5. In the NSSM dialog:
    - Path: `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
    - Startup directory: `C:\PrintMonitor`
-   - Arguments: `-ExecutionPolicy Bypass -NoProfile -File "C:\PrintMonitor\MonitorPrintJobs.ps1"`
+   - Arguments: `-ExecutionPolicy Bypass -NoProfile -File "C:\PrintMonitor\print-job-monitor.ps1"`
    - Service name: PrintJobMonitor
    - Set the service to Automatic start
 
@@ -178,43 +189,222 @@ For even more reliable operation, you can set up the script as a Windows Service
    nssm.exe start PrintJobMonitor
    ```
 
-## GitHub Integration
+## Advanced Customization Options
 
-To upload your project to GitHub:
+### Customizing Print Job Document Names
 
-1. Create a new repository on GitHub
+The script includes functionality to display more user-friendly document names for common print jobs. This is especially useful for system-generated documents that have cryptic names.
 
-2. Initialize a Git repository in your project folder:
-   ```bash
-   cd C:\PrintMonitor
-   git init
-   git add .
-   git commit -m "Initial commit"
+To customize document names:
+
+1. Open the `template.html` file
+
+2. Locate the `replaceDocumentNames()` JavaScript function:
+   ```javascript
+   function replaceDocumentNames() {
+       const replacements = {
+           "A2jn0293bdjOIDK": "Friendly Name 1",
+           "A2jnjK2JbdjOIDK": "Friendly Name 2",
+           "test page": "Friendly Name 3 - Test Page"
+           // Add more known document names and their friendly versions
+       };
+       
+       // Rest of the function...
+   }
    ```
 
-3. Connect to your GitHub repository:
-   ```bash
-   git remote add origin https://github.com/YourUsername/print-job-monitor.git
-   git branch -M main
-   git push -u origin main
+3. Add your own document name replacements to the `replacements` object:
+   ```javascript
+   const replacements = {
+       "cryptic-document-name": "User-Friendly Document Name",
+       "Excel.Sheet.12": "Excel Spreadsheet",
+       "Microsoft Word Document": "Word Document",
+       // Add more as needed
+   };
    ```
 
-## Customizing the Dashboard
+4. The script will automatically replace these names in the dashboard display.
 
-You can customize the HTML template:
+### Customizing Printer Name Formatting
+
+The script includes special formatting for printer names:
+
+1. In the PowerShell script, locate the `Build-HTMLContent` function
+
+2. Find the printer name formatting section:
+   ```powershell
+   $displayPrinterName = if ($job.Printer -match '^(hp)') {
+       $job.Printer.ToUpper()
+   } else {
+       $job.Printer
+   }
+   ```
+
+3. You can modify this pattern to match your printer naming convention:
+   ```powershell
+   # Custom printer name formatting
+   $displayPrinterName = if ($job.Printer -match '^(your-prefix)') {
+       # Format printers with your prefix in a specific way
+       $job.Printer.ToUpper()
+   } elseif ($job.Printer -match 'another-pattern') {
+       # Format printers matching another pattern differently
+       "DEPT: " + $job.Printer
+   } else {
+       # Default formatting
+       $job.Printer
+   }
+   ```
+
+### Modifying AD User Information Display
+
+You can customize what Active Directory information is displayed for users:
+
+1. Locate the `Get-UserInfo` function in the PowerShell script:
+   ```powershell
+   function Get-UserInfo {
+       param ([string]$SamAccountName)
+       # Function code...
+   }
+   ```
+
+2. Modify the `Get-ADUser` command to retrieve additional properties:
+   ```powershell
+   $user = Get-ADUser -Identity $normalizedKey -Properties DisplayName, Office, Department, Title -ErrorAction Stop
+   ```
+
+3. Update the returned user info object to include the new properties:
+   ```powershell
+   $userInfo = [PSCustomObject]@{
+       DisplayName = $user.DisplayName
+       Office = $user.Office
+       Department = $user.Department
+       Title = $user.Title
+   }
+   ```
+
+4. Then update how this information is used in the `Build-HTMLContent` function:
+   ```powershell
+   $topUsersHtml += "<tr>
+   <td class='highlight' title='$($userInfo.Office) - $($userInfo.Department)'>$crownIcon $($userInfo.DisplayName)</td>
+   <td>$($userData.TotalJobs)</td>
+   <td>$($userData.TotalPages)</td>
+   </tr>"
+   ```
+
+### Adding Custom Metrics and Reports
+
+You can add additional metrics to the dashboard:
+
+1. Create new tracking collections at the beginning of the script:
+   ```powershell
+   $documentTypeCounts = [System.Collections.Concurrent.ConcurrentDictionary[string,object]]::new()
+   ```
+
+2. Update the job processing in the runspace script block to track these metrics:
+   ```powershell
+   # Track document types
+   $docType = if ($documentName -match '\.(\w+)$') { $matches[1].ToLower() } else { "unknown" }
+   $null = $documentTypeCounts.AddOrUpdate(
+       $docType,
+       { [PSCustomObject]@{ Count = 1 } },
+       { param($key, $existingValue) [PSCustomObject]@{ Count = $existingValue.Count + 1 } }
+   )
+   ```
+
+3. Add new sections to the HTML template to display these metrics
+
+4. Update the `Build-HTMLContent` function to populate these new sections
+
+### Customizing the Dashboard Appearance
 
 1. Open `template.html` in a text editor
 
-2. Modify the header section to add your company name and logo:
+2. To modify the color scheme, find the `:root` CSS variables section:
+   ```css
+   :root {
+       --primary-color: #2763a2;
+       --secondary-color: #1a1a2e;
+       --accent-color: #ff9900;
+       /* more colors... */
+   }
+   ```
+
+3. Change these values to match your organization's branding
+
+4. To add your company logo:
    ```html
    <div class="logo-container">
-       <img src="https://path.to/your-logo.png" alt="company logo" class="company-logo">
+       <img src="path/to/your-logo.png" alt="company logo" class="company-logo">
        <h1>Print Monitoring System</h1>
    </div>
    <h2>Your Company Name</h2>
    ```
 
-3. Adjust CSS styles to match your company's color scheme in the `:root` variables
+5. For a local image, place the logo file in the same directory and reference it:
+   ```html
+   <img src="company-logo.png" alt="company logo" class="company-logo">
+   ```
+
+### Modifying Refresh Intervals
+
+1. To change how often the dashboard auto-refreshes:
+   - In `template.html`, find the line `const refreshRate = 30000; // 30 seconds in milliseconds`
+   - Change `30000` to your desired interval in milliseconds (e.g., `60000` for 1 minute)
+
+2. To change how often the PowerShell script updates the HTML file:
+   - In `MonitorPrintJobs.ps1`, find the line `$htmlRefreshInterval = 5  # Seconds between HTML refreshes`
+   - Change `5` to your desired interval in seconds
+
+### Adding Email Notifications
+
+You can add email notification functionality for high-volume printing or other alerts:
+
+1. Add the following variables to the configuration section:
+   ```powershell
+   $smtpServer = "your-smtp-server"
+   $emailFrom = "printmonitor@yourdomain.com"
+   $emailTo = "admin@yourdomain.com"
+   $notificationThreshold = 100 # Pages threshold for notification
+   ```
+
+2. Create a function to send email notifications:
+   ```powershell
+   function Send-PrintNotification {
+       param (
+           [string]$UserName,
+           [string]$PrinterName,
+           [int]$Pages,
+           [string]$DocumentName,
+           [string]$ServerName
+       )
+       
+       $subject = "High Volume Print Alert: $Pages pages"
+       $body = @"
+   High volume print job detected:
+   
+   User: $UserName
+   Printer: $PrinterName
+   Document: $DocumentName
+   Pages: $Pages
+   Server: $ServerName
+   Time: $(Get-Date)
+   "@
+       
+       try {
+           Send-MailMessage -SmtpServer $smtpServer -From $emailFrom -To $emailTo -Subject $subject -Body $body
+           Write-Host "Notification email sent for high volume print job." -ForegroundColor Yellow
+       } catch {
+           Write-Warning "Failed to send notification email: $($_.Exception.Message)"
+       }
+   }
+   ```
+
+3. Add the notification trigger in the print job processing section:
+   ```powershell
+   if ($pageCount -ge $notificationThreshold) {
+       Send-PrintNotification -UserName $userName -PrinterName $printerName -Pages $pageCount -DocumentName $documentName -ServerName $ServerName
+   }
+   ```
 
 ## Troubleshooting
 
@@ -246,6 +436,31 @@ You can customize the HTML template:
 3. Verify print jobs are being processed:
    ```powershell
    Get-WmiObject -Class Win32_PrintJob -ComputerName your-print-server
+   ```
+
+### Frequent Script Crashes
+
+1. Verify server stability and resource availability
+2. Check Windows Event Logs for related errors
+3. Increase error handling robustness:
+   ```powershell
+   # Add to the configuration section
+   $maxRetries = 5
+   $retryDelay = 10 # seconds
+   
+   # Then modify WMI connection code to use retry logic
+   $retryCount = 0
+   $connected = $false
+   while (-not $connected -and $retryCount -lt $maxRetries) {
+       try {
+           $scope.Connect()
+           $connected = $true
+       } catch {
+           $retryCount++
+           Write-Warning "Failed to connect to WMI on attempt $retryCount. Retrying in $retryDelay seconds..."
+           Start-Sleep -Seconds $retryDelay
+       }
+   }
    ```
 
 ### Additional Assistance
