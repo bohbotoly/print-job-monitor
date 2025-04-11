@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html dir="ltr" lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daily Print Job Monitoring</title>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.17.0/xlsx.full.min.js"></script>
+    <style>
+        :root {
+			--primary-color: #2763a2;
+				--secondary-color: #1a1a2e;
+				--accent-color: #ff9900;
+				--dark-bg: #1a1a2e;
+				--medium-bg: #16213e;
+				--light-bg: #1e2a4a;
+				--text-color: #f0f0f0;
+				--muted-text: #9ca3af;
+				--border-color: #2c3e50;
+				--success-color: #10b981;
+				--danger-color: #ef4444;
+				--warning-color: #f59e0b;
+				--hover-color: #2c3e50;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', 'Open Sans', Arial, sans-serif;
+        }
+        body {
+            background-color: var(--dark-bg);
+            color: var(--text-color);
+            line-height: 1.6;
+            direction: ltr;
+            min-height: 100vh;
+            padding: 0 1rem;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 1rem;
+        }
+        header {
+            background: linear-gradient(to right, var(--primary-color), var(--secondary-color));
+            color: white;
+            padding: 1.5rem 1rem;
+            margin-bottom: 2rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            text-align: center;
+        }
+        .logo-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 1rem;
+        }
+        .company-logo {
+            max-height: 60px;
+            margin-right: 1rem;
+        }
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            color: white;
+        }
+        h2 {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            color: var(--accent-color);
+            text-align: center;
+        }
+        .timestamp {
+            font-size: 0.9rem;
+            color: var(--muted-text);
+            text-align: center;
+            margin-bottom: 1rem;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 0.75rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 0.75rem 1.25rem;
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            transition: all 0.2s ease;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+        button:hover {
+            background-color: var(--secondary-color);
+            transform: translateY(-2px);
+        }
+        button.active {
+            background-color: var(--danger-color);
+        }
+        button.toggle-btn {
+            background-color: var(--light-bg);
+            border: 1px solid var(--border-color);
+        }
+        button.toggle-btn:hover {
+            background-color: var(--hover-color);
+        }
+        button.export-btn {
+            background-color: var(--success-color);
+        }
+        button.export-btn:hover {
+            background-color: #0d9488;
+        }
+        .section {
+            background-color: var(--medium-bg);
+            border-radius: 0.5rem;
+            margin-bottom: 2rem;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border-color);
+        }
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem;
+            background-color: var(--light-bg);
+            border-bottom: 1px solid var(--border-color);
+        }
+        .section-body {
+            padding: 1rem;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 0;
+            text-align: left;
+        }
+        th, td {
+            padding: 0.75rem 1rem;
+            border: 1px solid var(--border-color);
+        }
+        th {
+            background-color: var(--light-bg);
+            font-weight: 600;
+            cursor: pointer;
+            position: relative;
+            transition: all 0.2s ease;
+            white-space: nowrap;
+        }
+        th:hover {
+            background-color: var(--hover-color);
+        }
+        th::after {
+            content: "⯅⯆";
+            position: absolute;
+            right: 0.5rem;
+            color: var(--muted-text);
+            font-size: 0.7rem;
+            opacity: 0.5;
+        }
+        tr:nth-child(even) {
+            background-color: rgba(44, 62, 80, 0.2);
+        }
+        tr:hover {
+            background-color: var(--hover-color);
+        }
+        td.highlight {
+            color: var(--accent-color);
+            font-weight: bold;
+        }
+        #search-container {
+            background-color: var(--light-bg);
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-bottom: 1rem;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: center;
+            gap: 0.75rem;
+        }
+        #search-container label {
+            font-weight: 500;
+            margin-right: 0.5rem;
+        }
+        #search-container select,
+        #search-container input {
+            padding: 0.75rem 1rem;
+            border-radius: 0.375rem;
+            border: 1px solid var(--border-color);
+            background-color: var(--dark-bg);
+            color: var(--text-color);
+            font-size: 0.9rem;
+            min-width: 200px;
+        }
+        #search-container input:focus,
+        #search-container select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 2px rgba(0, 119, 204, 0.3);
+        }
+        .card {
+            background-color: var(--medium-bg);
+            border-radius: 0.5rem;
+            overflow: hidden;
+            margin-bottom: 1rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border: 1px solid var(--border-color);
+        }
+        .card-header {
+            padding: 1rem;
+            background-color: var(--light-bg);
+            border-bottom: 1px solid var(--border-color);
+            font-weight: 600;
+        }
+        .card-body {
+            padding: 1rem;
+        }
+        .table-controls {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+        }
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            background-color: var(--accent-color);
+            color: white;
+            border-radius: 0.25rem;
+            font-size: 0.8rem;
+            font-weight: bold;
+            margin-right: 0.5rem;
+        }
+        .info-text {
+            font-size: 0.9rem;
+            color: var(--muted-text);
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+        button.warning-btn {
+            background-color: var(--warning-color);
+        }
+        button.warning-btn:hover {
+            background-color: #d97706;
+        }
+        #watermark {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            font-size: 0.75rem;
+            color: var(--muted-text);
+            z-index: 9999;
+            opacity: 0.6;
+        }
+        @media (max-width: 768px) {
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            #search-container {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            table {
+                display: block;
+                overflow-x: auto;
+                white-space: nowrap;
+            }
+            
+            th, td {
+                padding: 0.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo-container">
+                <img src="https://path.to/logo.png" alt="company logo" class="company-logo">
+                <h1>Print Monitoring System</h1>
+            </div>
+            <h2>Company Name</h2>
+            <div class="timestamp">
+                <i class="far fa-clock"></i>
+                <span id="currentDate"></span>
+            </div>
+        </header>
+        <div class="controls">
+            <button id="refreshButton" onclick="toggleAutoRefresh()">
+                <i class="fas fa-sync-alt"></i>
+                Auto Refresh On
+            </button>
+            <button onclick="location.reload(true);">
+                <i class="fas fa-redo"></i>
+                Manually Refresh
+            </button>
+            <button onclick="exportToExcel()" class="export-btn">
+                <i class="fas fa-file-excel"></i>
+                Export to Excel
+            </button>
+        </div>
+        <!-- User Stats Section -->
+        <div class="section">
+            <div class="section-header">
+                <h2><i class="fas fa-users"></i> Top Users</h2>
+                <button onclick="toggleTable('userStats')" class="toggle-btn">
+                    <i id="userStatsIcon" class="fas fa-chevron-up"></i>
+                </button>
+            </div>
+            <div class="section-body" id="userStatsBody">
+                <table id='userStats'>
+                    <thead>
+                        <tr>
+                            <th>User Name</th>
+                            <th>Print Jobs</th>
+                            <th>Total Pages</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{topUsersHtml}}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <!-- Printer Stats Section -->
+        <div class="section">
+            <div class="section-header">
+                <h2><i class="fas fa-print"></i> Top Printers</h2>
+                <button onclick="toggleTable('printerStats')" class="toggle-btn">
+                    <i id="printerStatsIcon" class="fas fa-chevron-up"></i>
+                </button>
+            </div>
+            <div class="section-body" id="printerStatsBody">
+                <table id='printerStats'>
+                    <thead>
+                        <tr>
+                            <th>Printer Name</th>
+                            <th>Print Jobs</th>
+                            <th>Total Pages</th>
+                            <th>Server</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{topPrintersHtml}}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <!-- Print Jobs Section -->
+        <div class="section">
+            <div class="section-header">
+                <h2><i class="fas fa-list-alt"></i> Full Daily Print Jobs Table</h2>
+                <button onclick="toggleTable('printJobs')" class="toggle-btn">
+                    <i id="printJobsIcon" class="fas fa-chevron-up"></i>
+                </button>
+            </div>
+            <div class="section-body" id="printJobsBody">
+                <div id="search-container">
+                    <label for="filterType">Filter:</label>
+                    <select id="filterType" onchange="filterTable()">
+                        <option value="date">Date</option>
+                        <option value="user">User Name</option>
+                        <option value="document">Document</option>
+                        <option value="pages">Pages</option>
+                        <option value="printer">Printer Name</option>
+                        <option value="server">Server</option>
+                    </select>
+                    <input type="text" id="searchInput" onkeyup="filterTable()" placeholder="Type to Search...">
+                </div>
+                <div class="table-controls">
+                    <div>
+                        <span id="jobCount" class="badge">0</span>
+                        <span>Total Print Jobs</span>
+                    </div>
+                    <button id="toggleFullTableBtn" onclick="toggleFullTable()" class="warning-btn">
+                        <i class="fas fa-expand-arrows-alt"></i>
+                        Show Full Table
+                    </button>
+                </div>
+                <p id="limitedViewInfo" class="info-text">
+                    <i class="fas fa-info-circle"></i>
+                    Only last 300 Print Jobs are shown, press "Show Full Table"
+                </p>
+
+                <table id='printJobs'>
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>User Name</th>
+                            <th>Document</th>
+                            <th>Pages</th>
+                            <th>Printer Name</th>
+                            <th>Server</th>
+                        </tr>
+                    </thead>
+                    <tbody id="printJobsData">
+                        {{printJobsHtml}}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div id="watermark">By Bohbotoly © 2025</div>
+    <script>
+        let allPrintJobs = [];
+        let autoRefreshInterval = null;
+        const refreshRate = 30000; // 30 seconds in milliseconds
+        const limitedJobCount = 300; // Number of jobs to show in limited view
+        let isFullTableView = false; // Track current table view mode
+        
+        function setCurrentDate() {
+            const currentDate = new Date();
+            const options = { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' };
+            const formattedDate = currentDate.toLocaleDateString('en-US', options) + ' (Last Updated)';
+            document.getElementById('currentDate').innerText = formattedDate;
+        }
+        
+        function startAutoRefresh() {
+            if (autoRefreshInterval) return; // Already running
+            autoRefreshInterval = setInterval(() => {
+                location.reload(true); // Force reload ignoring cache
+            }, refreshRate);
+            document.getElementById('refreshButton').innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> Auto Refresh On (30 Sec)';
+            document.getElementById('refreshButton').classList.add('active');
+        }
+        
+        function stopAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+                document.getElementById('refreshButton').innerHTML = '<i class="fas fa-sync-alt"></i> Enable Auto Refresh';
+                document.getElementById('refreshButton').classList.remove('active');
+            }
+        }
+        
+        function toggleAutoRefresh() {
+            if (autoRefreshInterval) {
+                stopAutoRefresh();
+            } else {
+                startAutoRefresh();
+            }
+        }
+        
+        // Initialize table data when the page loads
+        function initializePrintJobs() {
+            const table = document.getElementById('printJobs');
+            const tbody = document.getElementById('printJobsData');
+            
+            // Store all rows in memory
+            const allRows = Array.from(tbody.rows);
+            allPrintJobs = allRows;
+            
+            // Update job count badge
+            document.getElementById('jobCount').textContent = allPrintJobs.length;
+            
+            // Initial view - show limited rows
+            showLimitedPrintJobs();
+        }
+        
+        // Show only the latest 300 print jobs
+        function showLimitedPrintJobs() {
+            const tbody = document.getElementById('printJobsData');
+            
+            // Clear the table
+            tbody.innerHTML = '';
+            
+            // If we have fewer than the limit, show all
+            const jobsToShow = allPrintJobs.length <= limitedJobCount ? 
+                allPrintJobs : 
+                allPrintJobs.slice(0, limitedJobCount);
+            
+            // Add the rows to the table
+            jobsToShow.forEach(row => {
+                tbody.appendChild(row.cloneNode(true));
+            });
+            
+            // Show limited view message
+            document.getElementById('limitedViewInfo').style.display = 'block';
+            
+            // Update button text
+            const toggleBtn = document.getElementById('toggleFullTableBtn');
+            toggleBtn.innerHTML = '<i class="fas fa-expand-arrows-alt"></i> Show Full Table';
+            toggleBtn.title = 'Show Full Table';
+            
+            isFullTableView = false;
+        }
+        
+        // Show all print jobs
+        function showAllPrintJobs() {
+            const tbody = document.getElementById('printJobsData');
+            
+            // Clear the table
+            tbody.innerHTML = '';
+            
+            // Add all rows to the table
+            allPrintJobs.forEach(row => {
+                tbody.appendChild(row.cloneNode(true));
+            });
+            
+            // Hide limited view message
+            document.getElementById('limitedViewInfo').style.display = 'none';
+            
+            // Update button text
+            const toggleBtn = document.getElementById('toggleFullTableBtn');
+            toggleBtn.innerHTML = '<i class="fas fa-compress-arrows-alt"></i> Show last jobs only';
+            toggleBtn.title = 'Show only last 300 print jobs';
+            
+            isFullTableView = true;
+        }
+        
+        // Toggle between limited and full table view
+        function toggleFullTable() {
+            if (isFullTableView) {
+                showLimitedPrintJobs();
+            } else {
+                showAllPrintJobs();
+            }
+        }
+        
+        // --- Sorting Logic ---
+        const sortState = {}; // Store sort direction for each column
+        
+        function sortTable(tableId, columnIndex, isNumeric = false, isDate = false) {
+            const table = document.getElementById(tableId);
+            const tbody = table.tBodies[0];
+            const rows = Array.from(tbody.rows);
+            const headerCell = table.tHead.rows[0].cells[columnIndex];
+            
+            // Clear previous sort indicators for all headers in this table
+            Array.from(table.tHead.rows[0].cells).forEach(cell => {
+                cell.classList.remove('sort-asc', 'sort-desc');
+            });
+            
+            // Determine sort direction (toggle if same column)
+            const direction = (sortState[tableId + columnIndex] === 'asc') ? 'desc' : 'asc';
+            sortState[tableId + columnIndex] = direction;
+            
+            // Update header visual indicator
+            headerCell.classList.add('sort-' + direction);
+            
+            rows.sort((a, b) => {
+                let valA = a.cells[columnIndex].innerText.trim();
+                let valB = b.cells[columnIndex].innerText.trim();
+                
+                if (isNumeric) {
+                    valA = parseFloat(valA) || 0; // Handle NaN
+                    valB = parseFloat(valB) || 0;
+                } else if (isDate) {
+                    // Attempt to parse date consistently (e.g., MM-dd-yyyy HH:mm)
+                    valA = parseDate(valA);
+                    valB = parseDate(valB);
+                } else {
+                    // Default to string comparison
+                    valA = valA.toLowerCase();
+                    valB = valB.toLowerCase();
+                }
+                
+                let comparison = 0;
+                if (valA < valB) comparison = -1;
+                if (valA > valB) comparison = 1;
+                
+                return direction === 'asc' ? comparison : comparison * -1;
+            });
+            
+            // Re-append sorted rows
+            rows.forEach(row => tbody.appendChild(row));
+            
+            // If this is the print jobs table, update the allPrintJobs array
+            if (tableId === 'printJobs') {
+                allPrintJobs = rows;
+            }
+        }
+        
+        function parseDate(dateString) {
+            // Assuming format "MM-dd-yyyy HH:mm" for English version
+            const parts = dateString.match(/(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2})/);
+            if (!parts) return new Date(0); // Invalid date
+            return new Date(parts[3], parts[1] - 1, parts[2], parts[4], parts[5]);
+        }
+        
+        // --- Filtering Logic ---
+        function filterTable() {
+            const filterValue = document.getElementById('searchInput').value.toLowerCase();
+            const filterType = document.getElementById('filterType').value;
+            
+            // Ensure we're working with all jobs (even when in limited view)
+            // This ensures search works across all records
+            let columnIndex;
+            if (filterType === 'date') columnIndex = 0; 
+            else if (filterType === 'user') columnIndex = 1;
+            else if (filterType === 'document') columnIndex = 2; 
+            else if (filterType === 'pages') columnIndex = 3;
+            else if (filterType === 'printer') columnIndex = 4;
+            else if (filterType === 'server') columnIndex = 5;
+            
+            // Filter the allPrintJobs array
+            const filteredJobs = allPrintJobs.filter(row => {
+                const cell = row.cells[columnIndex];
+                if (cell) {
+                    const cellText = cell.innerText.toLowerCase();
+                    return cellText.includes(filterValue);
+                }
+                return false;
+            });
+            
+            // Display the filtered results
+            const tbody = document.getElementById('printJobsData');
+            tbody.innerHTML = '';
+            filteredJobs.forEach(row => {
+                tbody.appendChild(row.cloneNode(true));
+            });
+            
+            // Update display information
+            document.getElementById('jobCount').textContent = filteredJobs.length;
+            
+            // If we're filtering, show all results (don't limit to 300)
+            if (filterValue.length > 0) {
+                document.getElementById('limitedViewInfo').style.display = 'none';
+            } else {
+                // If filter is cleared, return to previous state (limited or full)
+                if (isFullTableView) {
+                    showAllPrintJobs();
+                } else {
+                    showLimitedPrintJobs();
+                }
+            }
+        }
+        
+        // --- Excel Export ---
+        function exportToExcel() {
+            // Always export ALL rows regardless of current view
+            let data = [];
+            
+            // Get the table headers
+            const table = document.getElementById('printJobs');
+            const headers = Array.from(table.querySelectorAll('thead th')).map(th => th.innerText);
+            data.push(headers);
+            
+            // Add ALL job data from memory (not just what's visible)
+            allPrintJobs.forEach(row => {
+                const rowData = Array.from(row.cells).map(cell => cell.innerText);
+                data.push(rowData);
+            });
+            
+            // Create the Excel file
+            let ws = XLSX.utils.aoa_to_sheet(data);
+            let wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Print Jobs");
+            
+            const filename = "Print_Jobs_Report_" + new Date().toISOString().slice(0,10) + ".xlsx";
+            XLSX.writeFile(wb, filename);
+        }
+        
+        function replaceDocumentNames() {
+            const replacements = {
+                "A2jn0293bdjOIDK": "Friendly Name 1",
+                "A2jnjK2JbdjOIDK": "Friendly Name 2",
+                "test page": "Friendly Name 3 - Test Page"
+                // Add more known document names and their friendly versions
+            };
+            
+            // Apply to all job rows in memory
+            allPrintJobs.forEach(row => {
+                const docCell = row.cells[2]; 
+                if (docCell) {
+                    const originalText = docCell.innerText.trim().toLowerCase(); 
+                    if (replacements[originalText]) {
+                        docCell.innerText = replacements[originalText]; 
+                        docCell.title = originalText;
+                        docCell.classList.add('highlight');
+                    }
+                }
+            });
+        }
+        
+        function toggleTable(tableId) {
+            const tableBody = document.getElementById(tableId + 'Body');
+            const icon = document.getElementById(tableId + 'Icon');
+            
+            if (tableBody.style.display === "none") {
+                tableBody.style.display = "block";
+                icon.classList.remove('fa-chevron-down');
+                icon.classList.add('fa-chevron-up');
+            } else {
+                tableBody.style.display = "none";
+                icon.classList.remove('fa-chevron-up');
+                icon.classList.add('fa-chevron-down');
+            }
+        }
+        
+        window.onload = () => {
+            setCurrentDate();
+            initializePrintJobs(); // Initialize the print jobs table
+            startAutoRefresh(); // Start auto-refresh on load
+            replaceDocumentNames(); // Replace names after table is populated
+            
+            // Add event listeners for sorting
+            document.querySelectorAll('#userStats th').forEach((th, i) => {
+                th.addEventListener('click', () => sortTable('userStats', i, i > 0)); // Cols 1, 2 are numeric
+            });
+            
+            document.querySelectorAll('#printerStats th').forEach((th, i) => {
+                th.addEventListener('click', () => sortTable('printerStats', i, i > 0 && i < 3)); // Cols 1, 2 are numeric
+            });
+            
+            document.querySelectorAll('#printJobs th').forEach((th, i) => {
+                let isNumeric = (i === 3); // Pages column
+                let isDate = (i === 0); // Date column
+                th.addEventListener('click', () => sortTable('printJobs', i, isNumeric, isDate));
+            });
+        };
+    </script>
+</body>
+</html>
