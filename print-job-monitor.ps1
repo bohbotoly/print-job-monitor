@@ -734,6 +734,9 @@ function Build-TopUsersHtml {
 
     $htmlBuilder = [System.Text.StringBuilder]::new()
 
+    # Debug: Log dictionary count
+    Write-Log -Message "Building Top Users HTML. Dictionary has $($UserPrintCounts.Count) entries." -Level Verbose
+
     # Get all entries and filter/sort safely
     $topUsers = @($UserPrintCounts.GetEnumerator() |
         Where-Object { $_.Value -ne $null } |
@@ -751,33 +754,30 @@ function Build-TopUsersHtml {
         } -Descending |
         Select-Object -First $script:Config.TopItemsCount)
 
+    Write-Log -Message "Top Users after filtering: $($topUsers.Count) entries" -Level Verbose
+
     if ($topUsers.Count -eq 0) {
+        Write-Log -Message "No top users to display (count is 0)" -Level Verbose
         return $htmlBuilder.ToString()
     }
 
     $topUserKey = $topUsers[0].Key
 
     foreach ($userEntry in $topUsers) {
-        $userKey = $userEntry.Key
-        $userData = $userEntry.Value
-
-        # Defensive check - skip if data is incomplete
-        if (-not $userData) {
-            continue
-        }
-
-        # Try to access properties safely
         try {
-            $totalJobs = $userData.TotalJobs
-            $totalPages = $userData.TotalPages
+            $userKey = $userEntry.Key
+            $userData = $userEntry.Value
 
-            # Skip if values are null or zero (invalid data)
-            if ($null -eq $totalJobs -or $null -eq $totalPages) {
+            # Skip null data
+            if (-not $userData) {
                 continue
             }
 
-            $crownIcon = if ($userKey -eq $topUserKey) { $script:Config.TopUserIcon } else { '' }
+            # Access properties directly - let try-catch handle any errors
+            $totalJobs = $userData.TotalJobs
+            $totalPages = $userData.TotalPages
 
+            $crownIcon = if ($userKey -eq $topUserKey) { $script:Config.TopUserIcon } else { '' }
             $userInfo = Get-UserInfo -SamAccountName $userKey
 
             $null = $htmlBuilder.AppendLine("<tr>")
@@ -787,7 +787,8 @@ function Build-TopUsersHtml {
             $null = $htmlBuilder.AppendLine("</tr>")
         }
         catch {
-            # Skip entries with property access errors
+            # Log the error for debugging
+            Write-Log -Message "Error processing top user entry: $($_.Exception.Message)" -Level Warning
             continue
         }
     }
@@ -819,6 +820,9 @@ function Build-TopPrintersHtml {
 
     $htmlBuilder = [System.Text.StringBuilder]::new()
 
+    # Debug: Log dictionary count
+    Write-Log -Message "Building Top Printers HTML. Dictionary has $($PrinterPrintCounts.Count) entries." -Level Verbose
+
     # Get all entries and filter/sort safely
     $topPrinters = @($PrinterPrintCounts.GetEnumerator() |
         Where-Object { $_.Value -ne $null } |
@@ -836,30 +840,28 @@ function Build-TopPrintersHtml {
         } -Descending |
         Select-Object -First $script:Config.TopItemsCount)
 
+    Write-Log -Message "Top Printers after filtering: $($topPrinters.Count) entries" -Level Verbose
+
     if ($topPrinters.Count -eq 0) {
+        Write-Log -Message "No top printers to display (count is 0)" -Level Verbose
         return $htmlBuilder.ToString()
     }
 
     $topPrinterKey = $topPrinters[0].Key
 
     foreach ($printerEntry in $topPrinters) {
-        $printerKey = $printerEntry.Key
-        $printerData = $printerEntry.Value
-
-        # Defensive check - skip if data is incomplete
-        if (-not $printerData) {
-            continue
-        }
-
-        # Try to access properties safely
         try {
-            $totalJobs = $printerData.TotalJobs
-            $totalPages = $printerData.TotalPages
+            $printerKey = $printerEntry.Key
+            $printerData = $printerEntry.Value
 
-            # Skip if values are null or zero (invalid data)
-            if ($null -eq $totalJobs -or $null -eq $totalPages) {
+            # Skip null data
+            if (-not $printerData) {
                 continue
             }
+
+            # Access properties directly - let try-catch handle any errors
+            $totalJobs = $printerData.TotalJobs
+            $totalPages = $printerData.TotalPages
 
             $crownIcon = if ($printerKey -eq $topPrinterKey) { $script:Config.TopPrinterIcon } else { '' }
 
@@ -878,7 +880,8 @@ function Build-TopPrintersHtml {
             $null = $htmlBuilder.AppendLine("</tr>")
         }
         catch {
-            # Skip entries with property access errors
+            # Log the error for debugging
+            Write-Log -Message "Error processing top printer entry: $($_.Exception.Message)" -Level Warning
             continue
         }
     }
