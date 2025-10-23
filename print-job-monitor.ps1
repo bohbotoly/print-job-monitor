@@ -735,8 +735,7 @@ function Build-TopUsersHtml {
     $htmlBuilder = [System.Text.StringBuilder]::new()
 
     $topUsers = @($UserPrintCounts.GetEnumerator() |
-        Where-Object { $_.Value -and $_.Value.PSObject.Properties['TotalPages'] } |
-        Sort-Object { $_.Value.TotalPages } -Descending |
+        Sort-Object { [int]$_.Value.TotalPages } -Descending |
         Select-Object -First $script:Config.TopItemsCount)
 
     if ($topUsers.Count -eq 0) {
@@ -748,6 +747,11 @@ function Build-TopUsersHtml {
     foreach ($userEntry in $topUsers) {
         $userKey = $userEntry.Key
         $userData = $userEntry.Value
+
+        # Defensive check - skip if data is incomplete
+        if (-not $userData -or -not $userData.TotalJobs -or -not $userData.TotalPages) {
+            continue
+        }
 
         $crownIcon = if ($userKey -eq $topUserKey) { $script:Config.TopUserIcon } else { '' }
 
@@ -788,8 +792,7 @@ function Build-TopPrintersHtml {
     $htmlBuilder = [System.Text.StringBuilder]::new()
 
     $topPrinters = @($PrinterPrintCounts.GetEnumerator() |
-        Where-Object { $_.Value -and $_.Value.PSObject.Properties['TotalPages'] } |
-        Sort-Object { $_.Value.TotalPages } -Descending |
+        Sort-Object { [int]$_.Value.TotalPages } -Descending |
         Select-Object -First $script:Config.TopItemsCount)
 
     if ($topPrinters.Count -eq 0) {
@@ -801,6 +804,11 @@ function Build-TopPrintersHtml {
     foreach ($printerEntry in $topPrinters) {
         $printerKey = $printerEntry.Key
         $printerData = $printerEntry.Value
+
+        # Defensive check - skip if data is incomplete
+        if (-not $printerData -or -not $printerData.TotalJobs -or -not $printerData.TotalPages) {
+            continue
+        }
 
         $crownIcon = if ($printerKey -eq $topPrinterKey) { $script:Config.TopPrinterIcon } else { '' }
 
