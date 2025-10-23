@@ -734,8 +734,20 @@ function Build-TopUsersHtml {
 
     $htmlBuilder = [System.Text.StringBuilder]::new()
 
+    # Get all entries and filter/sort safely
     $topUsers = @($UserPrintCounts.GetEnumerator() |
-        Sort-Object { [int]$_.Value.TotalPages } -Descending |
+        Where-Object { $_.Value -ne $null } |
+        Sort-Object {
+            try {
+                if ($_.Value.PSObject.Properties.Match('TotalPages').Count -gt 0) {
+                    [int]$_.Value.TotalPages
+                } else {
+                    0
+                }
+            } catch {
+                0
+            }
+        } -Descending |
         Select-Object -First $script:Config.TopItemsCount)
 
     if ($topUsers.Count -eq 0) {
@@ -791,8 +803,20 @@ function Build-TopPrintersHtml {
 
     $htmlBuilder = [System.Text.StringBuilder]::new()
 
+    # Get all entries and filter/sort safely
     $topPrinters = @($PrinterPrintCounts.GetEnumerator() |
-        Sort-Object { [int]$_.Value.TotalPages } -Descending |
+        Where-Object { $_.Value -ne $null } |
+        Sort-Object {
+            try {
+                if ($_.Value.PSObject.Properties.Match('TotalPages').Count -gt 0) {
+                    [int]$_.Value.TotalPages
+                } else {
+                    0
+                }
+            } catch {
+                0
+            }
+        } -Descending |
         Select-Object -First $script:Config.TopItemsCount)
 
     if ($topPrinters.Count -eq 0) {
