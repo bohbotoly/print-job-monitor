@@ -1209,51 +1209,54 @@ $script:MonitoringScriptBlock = {
                     $uniqueId = [Guid]::NewGuid().ToString()
                     $jobKey = "$normalizedUserName-$jobId-$uniqueId"
 
-                    # Capture page count for use in scriptblocks (avoid closure issues)
+                    # Capture page count for use in updates
                     $currentPageCount = $pageCount
 
-                    # Update user statistics
-                    $newUserValue = $UserPrintCounts.AddOrUpdate(
-                        $normalizedUserName,
-                        {
-                            param($key)
-                            $obj = @{
+                    # Update user statistics using TryGetValue/TryAdd/TryUpdate pattern
+                    # This avoids scriptblock-to-delegate conversion issues
+                    $userUpdated = $false
+                    do {
+                        $existingUserValue = $null
+                        if ($UserPrintCounts.TryGetValue($normalizedUserName, [ref]$existingUserValue)) {
+                            # Update existing entry
+                            $newUserValue = @{
+                                TotalJobs = $existingUserValue['TotalJobs'] + 1
+                                TotalPages = $existingUserValue['TotalPages'] + $currentPageCount
+                            }
+                            $userUpdated = $UserPrintCounts.TryUpdate($normalizedUserName, $newUserValue, $existingUserValue)
+                        } else {
+                            # Add new entry
+                            $newUserValue = @{
                                 TotalJobs = 1
                                 TotalPages = $currentPageCount
                             }
-                            return $obj
-                        },
-                        {
-                            param($key, $existingValue)
-                            $obj = @{
-                                TotalJobs = $existingValue.TotalJobs + 1
-                                TotalPages = $existingValue.TotalPages + $currentPageCount
-                            }
-                            return $obj
+                            $userUpdated = $UserPrintCounts.TryAdd($normalizedUserName, $newUserValue)
                         }
-                    )
+                    } while (-not $userUpdated)
+
                     Send-MessageToMainThread -Message "[$ServerName] User stats for '$normalizedUserName': Type=$($newUserValue.GetType().Name), Jobs=$($newUserValue['TotalJobs']), Pages=$($newUserValue['TotalPages'])" -Color 'Cyan'
 
-                    # Update printer statistics
-                    $newPrinterValue = $PrinterPrintCounts.AddOrUpdate(
-                        $printerKey,
-                        {
-                            param($key)
-                            $obj = @{
+                    # Update printer statistics using same pattern
+                    $printerUpdated = $false
+                    do {
+                        $existingPrinterValue = $null
+                        if ($PrinterPrintCounts.TryGetValue($printerKey, [ref]$existingPrinterValue)) {
+                            # Update existing entry
+                            $newPrinterValue = @{
+                                TotalJobs = $existingPrinterValue['TotalJobs'] + 1
+                                TotalPages = $existingPrinterValue['TotalPages'] + $currentPageCount
+                            }
+                            $printerUpdated = $PrinterPrintCounts.TryUpdate($printerKey, $newPrinterValue, $existingPrinterValue)
+                        } else {
+                            # Add new entry
+                            $newPrinterValue = @{
                                 TotalJobs = 1
                                 TotalPages = $currentPageCount
                             }
-                            return $obj
-                        },
-                        {
-                            param($key, $existingValue)
-                            $obj = @{
-                                TotalJobs = $existingValue['TotalJobs'] + 1
-                                TotalPages = $existingValue['TotalPages'] + $currentPageCount
-                            }
-                            return $obj
+                            $printerUpdated = $PrinterPrintCounts.TryAdd($printerKey, $newPrinterValue)
                         }
-                    )
+                    } while (-not $printerUpdated)
+
                     Send-MessageToMainThread -Message "[$ServerName] Printer stats for '$printerKey': Type=$($newPrinterValue.GetType().Name), Jobs=$($newPrinterValue['TotalJobs']), Pages=$($newPrinterValue['TotalPages'])" -Color 'Cyan'
 
                     # Add to recent jobs queue
