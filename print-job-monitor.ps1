@@ -734,9 +734,9 @@ function Build-TopUsersHtml {
 
     $htmlBuilder = [System.Text.StringBuilder]::new()
 
-    $topUsers = $UserPrintCounts.GetEnumerator() |
+    $topUsers = @($UserPrintCounts.GetEnumerator() |
         Sort-Object { $_.Value.TotalPages } -Descending |
-        Select-Object -First $script:Config.TopItemsCount
+        Select-Object -First $script:Config.TopItemsCount)
 
     if ($topUsers.Count -eq 0) {
         return $htmlBuilder.ToString()
@@ -786,9 +786,9 @@ function Build-TopPrintersHtml {
 
     $htmlBuilder = [System.Text.StringBuilder]::new()
 
-    $topPrinters = $PrinterPrintCounts.GetEnumerator() |
+    $topPrinters = @($PrinterPrintCounts.GetEnumerator() |
         Sort-Object { $_.Value.TotalPages } -Descending |
-        Select-Object -First $script:Config.TopItemsCount
+        Select-Object -First $script:Config.TopItemsCount)
 
     if ($topPrinters.Count -eq 0) {
         return $htmlBuilder.ToString()
@@ -1516,48 +1516,58 @@ function Start-PrintJobMonitoring {
 
         # Main monitoring loop
         while ($true) {
-            # Process messages from background threads
-            while ($script:SyncHash.MessageQueue.Count -gt 0) {
-                $message = $null
-                if ($script:SyncHash.MessageQueue.TryDequeue([ref]$message)) {
-                    Write-Log -Message $message.Message -Level Information
+            try {
+                # Process messages from background threads
+                while ($script:SyncHash.MessageQueue.Count -gt 0) {
+                    $message = $null
+                    if ($script:SyncHash.MessageQueue.TryDequeue([ref]$message)) {
+                        Write-Log -Message $message.Message -Level Information
+                    }
                 }
+
+                # Check for date change (log rotation)
+                $today = Get-Date -Format 'yyyy-MM-dd'
+                if ($today -ne $script:Config.CurrentDate) {
+                    Write-Log -Message "Date changed to $today. Stopping monitoring for log rotation." -Level Warning
+                    break
+                }
+
+                # Periodic runspace health check
+                if ((Get-Date) -ge $script:Config.LastRunspaceCheck.AddSeconds($script:Config.RunspaceCheckInterval)) {
+                    Test-RunspaceHealth `
+                        -ActiveRunspaces $script:ActiveRunspaces `
+                        -ServerConfigs $script:Config.ServerConfigs `
+                        -RunspacePool $script:RunspacePool `
+                        -UserPrintCounts $script:UserPrintCounts `
+                        -PrinterPrintCounts $script:PrinterPrintCounts `
+                        -RecentJobs $script:RecentJobs `
+                        -WmiQueryInterval $script:Config.WmiQueryInterval `
+                        -SyncHash $script:SyncHash
+
+                    $script:Config.LastRunspaceCheck = Get-Date
+                }
+
+                # Periodic HTML update
+                $script:Config.LastHtmlRefresh = Update-HtmlIfNeeded `
+                    -LastRefreshTime $script:Config.LastHtmlRefresh `
+                    -RefreshIntervalSeconds $script:Config.HtmlRefreshInterval `
+                    -OutputFile $script:Config.HtmlFile `
+                    -UserCounts $script:UserPrintCounts `
+                    -PrinterCounts $script:PrinterPrintCounts `
+                    -JobsQueue $script:RecentJobs `
+                    -HtmlTemplatePath $script:Config.HtmlTemplatePath
+
+                # Sleep to prevent high CPU usage
+                Start-Sleep -Milliseconds 100
             }
+            catch {
+                # Log errors in the monitoring loop but don't exit
+                Write-Log -Message "Error in monitoring loop: $($_.Exception.Message)" -Level Error
+                Write-Log -Message "Stack trace: $($_.ScriptStackTrace)" -Level Verbose
 
-            # Check for date change (log rotation)
-            $today = Get-Date -Format 'yyyy-MM-dd'
-            if ($today -ne $script:Config.CurrentDate) {
-                Write-Log -Message "Date changed to $today. Stopping monitoring for log rotation." -Level Warning
-                break
+                # Sleep before continuing to prevent rapid error loops
+                Start-Sleep -Seconds 1
             }
-
-            # Periodic runspace health check
-            if ((Get-Date) -ge $script:Config.LastRunspaceCheck.AddSeconds($script:Config.RunspaceCheckInterval)) {
-                Test-RunspaceHealth `
-                    -ActiveRunspaces $script:ActiveRunspaces `
-                    -ServerConfigs $script:Config.ServerConfigs `
-                    -RunspacePool $script:RunspacePool `
-                    -UserPrintCounts $script:UserPrintCounts `
-                    -PrinterPrintCounts $script:PrinterPrintCounts `
-                    -RecentJobs $script:RecentJobs `
-                    -WmiQueryInterval $script:Config.WmiQueryInterval `
-                    -SyncHash $script:SyncHash
-
-                $script:Config.LastRunspaceCheck = Get-Date
-            }
-
-            # Periodic HTML update
-            $script:Config.LastHtmlRefresh = Update-HtmlIfNeeded `
-                -LastRefreshTime $script:Config.LastHtmlRefresh `
-                -RefreshIntervalSeconds $script:Config.HtmlRefreshInterval `
-                -OutputFile $script:Config.HtmlFile `
-                -UserCounts $script:UserPrintCounts `
-                -PrinterCounts $script:PrinterPrintCounts `
-                -JobsQueue $script:RecentJobs `
-                -HtmlTemplatePath $script:Config.HtmlTemplatePath
-
-            # Sleep to prevent high CPU usage
-            Start-Sleep -Milliseconds 100
         }
     }
     finally {
@@ -1652,7 +1662,8 @@ function Start-PrintJobMonitoring {
             }
         }
         catch {
-            Write-Log -Message "Error generating final HTML report: $($_.Exception.Message)" -Level Error -ErrorRecord $_
+            # Don't use -ErrorRecord here to avoid recursive error logging
+            Write-Warning "Error generating final HTML report: $($_.Exception.Message)"
         }
 
         Write-Log -Message '=== Print Job Monitor Stopped ===' -Level Information
@@ -1668,7 +1679,7 @@ try {
     Start-PrintJobMonitoring
 }
 catch {
-    Write-Log -Message "Fatal error in print job monitoring: $($_.Exception.Message)" -Level Error -ErrorRecord $_
+    Write-Error "Fatal error in print job monitoring: $($_.Exception.Message)"
     exit 1
 }
 
