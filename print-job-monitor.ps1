@@ -147,10 +147,18 @@ param(
 )
 
 #Requires -Version 5.1
-#Requires -Modules ActiveDirectory
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Import Active Directory module if available
+try {
+    Import-Module ActiveDirectory -ErrorAction Stop
+}
+catch {
+    Write-Warning "Active Directory module not available. User lookups will use usernames only."
+    Write-Warning "Error: $($_.Exception.Message)"
+}
 
 #region Script Configuration
 
@@ -173,8 +181,8 @@ $script:Config = [PSCustomObject]@{
     # Display Configuration
     TopItemsCount = $TopItemsCount
     MaxDocumentNameLength = $MaxDocumentNameLength
-    TopUserIcon = [char]0x1F451  # Crown emoji
-    TopPrinterIcon = [char]0x1F451
+    TopUserIcon = '👑'  # Crown emoji (U+1F451)
+    TopPrinterIcon = '👑'  # Crown emoji (U+1F451)
 
     # File Operation Configuration
     FileRetryCount = $FileRetryCount
