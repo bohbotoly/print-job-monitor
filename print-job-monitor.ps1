@@ -1204,14 +1204,14 @@ $script:MonitoringScriptBlock = {
                     $null = $UserPrintCounts.AddOrUpdate(
                         $normalizedUserName,
                         {
-                            [PSCustomObject]@{
+                            @{
                                 TotalJobs = 1
                                 TotalPages = $pageCount
                             }
                         },
                         {
                             param($key, $existingValue)
-                            [PSCustomObject]@{
+                            @{
                                 TotalJobs = $existingValue.TotalJobs + 1
                                 TotalPages = $existingValue.TotalPages + $pageCount
                             }
@@ -1222,14 +1222,14 @@ $script:MonitoringScriptBlock = {
                     $null = $PrinterPrintCounts.AddOrUpdate(
                         $printerKey,
                         {
-                            [PSCustomObject]@{
+                            @{
                                 TotalJobs = 1
                                 TotalPages = $pageCount
                             }
                         },
                         {
                             param($key, $existingValue)
-                            [PSCustomObject]@{
+                            @{
                                 TotalJobs = $existingValue.TotalJobs + 1
                                 TotalPages = $existingValue.TotalPages + $pageCount
                             }
