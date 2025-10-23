@@ -739,7 +739,8 @@ function Build-TopUsersHtml {
         Where-Object { $_.Value -ne $null } |
         Sort-Object {
             try {
-                if ($_.Value.PSObject.Properties.Match('TotalPages').Count -gt 0) {
+                # Use simple property access with default value
+                if ($null -ne $_.Value.TotalPages) {
                     [int]$_.Value.TotalPages
                 } else {
                     0
@@ -765,23 +766,30 @@ function Build-TopUsersHtml {
             continue
         }
 
-        # Safely check if required properties exist
-        $hasRequiredProps = ($userData.PSObject.Properties.Match('TotalJobs').Count -gt 0) -and
-                           ($userData.PSObject.Properties.Match('TotalPages').Count -gt 0)
+        # Try to access properties safely
+        try {
+            $totalJobs = $userData.TotalJobs
+            $totalPages = $userData.TotalPages
 
-        if (-not $hasRequiredProps) {
+            # Skip if values are null or zero (invalid data)
+            if ($null -eq $totalJobs -or $null -eq $totalPages) {
+                continue
+            }
+
+            $crownIcon = if ($userKey -eq $topUserKey) { $script:Config.TopUserIcon } else { '' }
+
+            $userInfo = Get-UserInfo -SamAccountName $userKey
+
+            $null = $htmlBuilder.AppendLine("<tr>")
+            $null = $htmlBuilder.AppendLine("    <td class='highlight' title='$($userInfo.Office)'>$crownIcon $($userInfo.DisplayName)</td>")
+            $null = $htmlBuilder.AppendLine("    <td>$totalJobs</td>")
+            $null = $htmlBuilder.AppendLine("    <td>$totalPages</td>")
+            $null = $htmlBuilder.AppendLine("</tr>")
+        }
+        catch {
+            # Skip entries with property access errors
             continue
         }
-
-        $crownIcon = if ($userKey -eq $topUserKey) { $script:Config.TopUserIcon } else { '' }
-
-        $userInfo = Get-UserInfo -SamAccountName $userKey
-
-        $null = $htmlBuilder.AppendLine("<tr>")
-        $null = $htmlBuilder.AppendLine("    <td class='highlight' title='$($userInfo.Office)'>$crownIcon $($userInfo.DisplayName)</td>")
-        $null = $htmlBuilder.AppendLine("    <td>$($userData.TotalJobs)</td>")
-        $null = $htmlBuilder.AppendLine("    <td>$($userData.TotalPages)</td>")
-        $null = $htmlBuilder.AppendLine("</tr>")
     }
 
     return $htmlBuilder.ToString()
@@ -816,7 +824,8 @@ function Build-TopPrintersHtml {
         Where-Object { $_.Value -ne $null } |
         Sort-Object {
             try {
-                if ($_.Value.PSObject.Properties.Match('TotalPages').Count -gt 0) {
+                # Use simple property access with default value
+                if ($null -ne $_.Value.TotalPages) {
                     [int]$_.Value.TotalPages
                 } else {
                     0
@@ -842,29 +851,36 @@ function Build-TopPrintersHtml {
             continue
         }
 
-        # Safely check if required properties exist
-        $hasRequiredProps = ($printerData.PSObject.Properties.Match('TotalJobs').Count -gt 0) -and
-                           ($printerData.PSObject.Properties.Match('TotalPages').Count -gt 0)
+        # Try to access properties safely
+        try {
+            $totalJobs = $printerData.TotalJobs
+            $totalPages = $printerData.TotalPages
 
-        if (-not $hasRequiredProps) {
+            # Skip if values are null or zero (invalid data)
+            if ($null -eq $totalJobs -or $null -eq $totalPages) {
+                continue
+            }
+
+            $crownIcon = if ($printerKey -eq $topPrinterKey) { $script:Config.TopPrinterIcon } else { '' }
+
+            # Extract server and printer name from combined key (server:::printer)
+            $parts = $printerKey -split ':::'
+            $printerNameOnly = if ($parts.Count -ge 2) { $parts[1] } else { $printerKey }
+            $serverNameOnly = if ($parts.Count -ge 2) { $parts[0] } else { 'Unknown' }
+
+            $displayPrinterName = Format-PrinterName -PrinterName $printerNameOnly
+
+            $null = $htmlBuilder.AppendLine("<tr>")
+            $null = $htmlBuilder.AppendLine("    <td class='highlight'>$displayPrinterName $crownIcon</td>")
+            $null = $htmlBuilder.AppendLine("    <td>$totalJobs</td>")
+            $null = $htmlBuilder.AppendLine("    <td>$totalPages</td>")
+            $null = $htmlBuilder.AppendLine("    <td>$serverNameOnly</td>")
+            $null = $htmlBuilder.AppendLine("</tr>")
+        }
+        catch {
+            # Skip entries with property access errors
             continue
         }
-
-        $crownIcon = if ($printerKey -eq $topPrinterKey) { $script:Config.TopPrinterIcon } else { '' }
-
-        # Extract server and printer name from combined key (server:::printer)
-        $parts = $printerKey -split ':::'
-        $printerNameOnly = if ($parts.Count -ge 2) { $parts[1] } else { $printerKey }
-        $serverNameOnly = if ($parts.Count -ge 2) { $parts[0] } else { 'Unknown' }
-
-        $displayPrinterName = Format-PrinterName -PrinterName $printerNameOnly
-
-        $null = $htmlBuilder.AppendLine("<tr>")
-        $null = $htmlBuilder.AppendLine("    <td class='highlight'>$displayPrinterName $crownIcon</td>")
-        $null = $htmlBuilder.AppendLine("    <td>$($printerData.TotalJobs)</td>")
-        $null = $htmlBuilder.AppendLine("    <td>$($printerData.TotalPages)</td>")
-        $null = $htmlBuilder.AppendLine("    <td>$serverNameOnly</td>")
-        $null = $htmlBuilder.AppendLine("</tr>")
     }
 
     return $htmlBuilder.ToString()
