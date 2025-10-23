@@ -224,9 +224,9 @@ if (-not (Test-Path -Path $script:Config.OutputDirectory)) {
     New-Item -ItemType Directory -Path $script:Config.OutputDirectory -Force | Out-Null
 }
 
-# Generate HTML output filename
+# Generate HTML output filename base (will be made unique in Start-PrintJobMonitoring)
 $dateString = Get-Date -Format 'dd-MM-yyyy'
-$htmlFileBase = Join-Path -Path $script:Config.OutputDirectory -ChildPath "PrintJobsLog-PrintServers-$dateString"
+$script:HtmlFileBase = Join-Path -Path $script:Config.OutputDirectory -ChildPath "PrintJobsLog-PrintServers-$dateString"
 
 # Thread-safe collections
 $script:AdCache = @{}
@@ -314,7 +314,9 @@ function Write-Log {
         }
         'Error' {
             if ($ErrorRecord) {
-                Write-Error -Message $formattedMessage -ErrorRecord $ErrorRecord
+                # When ErrorRecord is provided, just output the formatted message as the error text
+                # Don't use -ErrorRecord parameter to avoid parameter set conflicts
+                Write-Error -Message "$formattedMessage`nDetails: $($ErrorRecord.Exception.Message)" -Category $ErrorRecord.CategoryInfo.Category
             } else {
                 Write-Error -Message $formattedMessage
             }
@@ -1474,7 +1476,7 @@ function Start-PrintJobMonitoring {
     }
 
     # Generate unique HTML filename
-    $script:Config.HtmlFile = Get-UniqueFileName -BaseName $htmlFileBase -Extension 'html'
+    $script:Config.HtmlFile = Get-UniqueFileName -BaseName $script:HtmlFileBase -Extension 'html'
 
     # Display configuration
     Write-Log -Message '=== Print Job Monitor Starting ===' -Level Information
