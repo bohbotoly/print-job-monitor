@@ -761,7 +761,15 @@ function Build-TopUsersHtml {
         $userData = $userEntry.Value
 
         # Defensive check - skip if data is incomplete
-        if (-not $userData -or -not $userData.TotalJobs -or -not $userData.TotalPages) {
+        if (-not $userData) {
+            continue
+        }
+
+        # Safely check if required properties exist
+        $hasRequiredProps = ($userData.PSObject.Properties.Match('TotalJobs').Count -gt 0) -and
+                           ($userData.PSObject.Properties.Match('TotalPages').Count -gt 0)
+
+        if (-not $hasRequiredProps) {
             continue
         }
 
@@ -830,7 +838,15 @@ function Build-TopPrintersHtml {
         $printerData = $printerEntry.Value
 
         # Defensive check - skip if data is incomplete
-        if (-not $printerData -or -not $printerData.TotalJobs -or -not $printerData.TotalPages) {
+        if (-not $printerData) {
+            continue
+        }
+
+        # Safely check if required properties exist
+        $hasRequiredProps = ($printerData.PSObject.Properties.Match('TotalJobs').Count -gt 0) -and
+                           ($printerData.PSObject.Properties.Match('TotalPages').Count -gt 0)
+
+        if (-not $hasRequiredProps) {
             continue
         }
 
