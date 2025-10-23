@@ -735,6 +735,7 @@ function Build-TopUsersHtml {
     $htmlBuilder = [System.Text.StringBuilder]::new()
 
     $topUsers = @($UserPrintCounts.GetEnumerator() |
+        Where-Object { $_.Value -and $_.Value.PSObject.Properties['TotalPages'] } |
         Sort-Object { $_.Value.TotalPages } -Descending |
         Select-Object -First $script:Config.TopItemsCount)
 
@@ -787,6 +788,7 @@ function Build-TopPrintersHtml {
     $htmlBuilder = [System.Text.StringBuilder]::new()
 
     $topPrinters = @($PrinterPrintCounts.GetEnumerator() |
+        Where-Object { $_.Value -and $_.Value.PSObject.Properties['TotalPages'] } |
         Sort-Object { $_.Value.TotalPages } -Descending |
         Select-Object -First $script:Config.TopItemsCount)
 
