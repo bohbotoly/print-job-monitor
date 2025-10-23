@@ -742,9 +742,9 @@ function Build-TopUsersHtml {
         Where-Object { $_.Value -ne $null } |
         Sort-Object {
             try {
-                # Use simple property access with default value
-                if ($null -ne $_.Value.TotalPages) {
-                    [int]$_.Value.TotalPages
+                # Use bracket notation for hashtable access
+                if ($null -ne $_.Value['TotalPages']) {
+                    [int]$_.Value['TotalPages']
                 } else {
                     0
                 }
@@ -770,12 +770,19 @@ function Build-TopUsersHtml {
 
             # Skip null data
             if (-not $userData) {
+                Write-Log -Message "Skipping user entry with null data for key: $userKey" -Level Verbose
                 continue
             }
 
-            # Access properties directly - let try-catch handle any errors
-            $totalJobs = $userData.TotalJobs
-            $totalPages = $userData.TotalPages
+            # Debug: Log the type and content
+            $dataType = $userData.GetType().Name
+            Write-Log -Message "Processing user '$userKey': Type=$dataType" -Level Verbose
+
+            # Access hashtable values using bracket notation for reliability across runspaces
+            $totalJobs = $userData['TotalJobs']
+            $totalPages = $userData['TotalPages']
+
+            Write-Log -Message "User '$userKey': Jobs=$totalJobs, Pages=$totalPages (accessed via bracket notation)" -Level Verbose
 
             $crownIcon = if ($userKey -eq $topUserKey) { $script:Config.TopUserIcon } else { '' }
             $userInfo = Get-UserInfo -SamAccountName $userKey
@@ -828,9 +835,9 @@ function Build-TopPrintersHtml {
         Where-Object { $_.Value -ne $null } |
         Sort-Object {
             try {
-                # Use simple property access with default value
-                if ($null -ne $_.Value.TotalPages) {
-                    [int]$_.Value.TotalPages
+                # Use bracket notation for hashtable access
+                if ($null -ne $_.Value['TotalPages']) {
+                    [int]$_.Value['TotalPages']
                 } else {
                     0
                 }
@@ -859,9 +866,11 @@ function Build-TopPrintersHtml {
                 continue
             }
 
-            # Access properties directly - let try-catch handle any errors
-            $totalJobs = $printerData.TotalJobs
-            $totalPages = $printerData.TotalPages
+            # Access hashtable values using bracket notation for reliability across runspaces
+            $totalJobs = $printerData['TotalJobs']
+            $totalPages = $printerData['TotalPages']
+
+            Write-Log -Message "Printer '$printerKey': Jobs=$totalJobs, Pages=$totalPages (accessed via bracket notation)" -Level Verbose
 
             $crownIcon = if ($printerKey -eq $topPrinterKey) { $script:Config.TopPrinterIcon } else { '' }
 
@@ -1200,41 +1209,52 @@ $script:MonitoringScriptBlock = {
                     $uniqueId = [Guid]::NewGuid().ToString()
                     $jobKey = "$normalizedUserName-$jobId-$uniqueId"
 
+                    # Capture page count for use in scriptblocks (avoid closure issues)
+                    $currentPageCount = $pageCount
+
                     # Update user statistics
-                    $null = $UserPrintCounts.AddOrUpdate(
+                    $newUserValue = $UserPrintCounts.AddOrUpdate(
                         $normalizedUserName,
                         {
-                            @{
+                            param($key)
+                            $obj = @{
                                 TotalJobs = 1
-                                TotalPages = $pageCount
+                                TotalPages = $currentPageCount
                             }
+                            return $obj
                         },
                         {
                             param($key, $existingValue)
-                            @{
+                            $obj = @{
                                 TotalJobs = $existingValue.TotalJobs + 1
-                                TotalPages = $existingValue.TotalPages + $pageCount
+                                TotalPages = $existingValue.TotalPages + $currentPageCount
                             }
+                            return $obj
                         }
                     )
+                    Send-MessageToMainThread -Message "[$ServerName] User stats for '$normalizedUserName': Type=$($newUserValue.GetType().Name), Jobs=$($newUserValue['TotalJobs']), Pages=$($newUserValue['TotalPages'])" -Color 'Cyan'
 
                     # Update printer statistics
-                    $null = $PrinterPrintCounts.AddOrUpdate(
+                    $newPrinterValue = $PrinterPrintCounts.AddOrUpdate(
                         $printerKey,
                         {
-                            @{
+                            param($key)
+                            $obj = @{
                                 TotalJobs = 1
-                                TotalPages = $pageCount
+                                TotalPages = $currentPageCount
                             }
+                            return $obj
                         },
                         {
                             param($key, $existingValue)
-                            @{
-                                TotalJobs = $existingValue.TotalJobs + 1
-                                TotalPages = $existingValue.TotalPages + $pageCount
+                            $obj = @{
+                                TotalJobs = $existingValue['TotalJobs'] + 1
+                                TotalPages = $existingValue['TotalPages'] + $currentPageCount
                             }
+                            return $obj
                         }
                     )
+                    Send-MessageToMainThread -Message "[$ServerName] Printer stats for '$printerKey': Type=$($newPrinterValue.GetType().Name), Jobs=$($newPrinterValue['TotalJobs']), Pages=$($newPrinterValue['TotalPages'])" -Color 'Cyan'
 
                     # Add to recent jobs queue
                     $newJobEntry = @{
