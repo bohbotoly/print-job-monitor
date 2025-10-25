@@ -1,719 +1,1778 @@
-﻿#region Configuration and Initialization
-Import-Module ActiveDirectory
-# Configuration: List of servers to monitor
-$serverConfigs = @(
-    @{
-        ServerName = "localhost" # Changed to your print server
-        Description = "Server Description" # Changed description
-		
-		#You can add more print servers
-    }
-)
-# Path to HTML template file
-# Get the directory where the current script is located
-$scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
+<#
+.SYNOPSIS
+    Monitors print jobs across Windows print servers and generates real-time HTML reports.
 
-# Set paths relative to the script location
-$htmlTemplatePath = Join-Path -Path $scriptDirectory -ChildPath "template.html"
-$outputDirectory = $scriptDirectory
-if (-not (Test-Path $outputDirectory)) {
-    New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+.DESCRIPTION
+    The Print Job Monitor provides real-time monitoring of print jobs across one or more Windows print servers.
+    It uses WMI event watchers to detect new print jobs as they occur, tracks user and printer statistics,
+    and generates a continuously updated HTML report with the following information:
+
+    - Top users by pages printed
+    - Top printers by usage
+    - Recent print job history with user, document, and printer details
+
+    The script uses Active Directory integration to enrich data with user display names and office locations,
+    and employs parallel processing via PowerShell runspaces for efficient multi-server monitoring.
+
+.PARAMETER ServerConfigs
+    Array of hashtables containing server configurations. Each hashtable should have:
+    - ServerName: The name or IP of the print server to monitor
+    - Description: A friendly description of the server
+
+.PARAMETER HtmlTemplatePath
+    Path to the HTML template file. If not specified, defaults to 'template.html' in the script directory.
+
+.PARAMETER OutputDirectory
+    Directory where HTML reports will be saved. If not specified, defaults to the script directory.
+
+.PARAMETER WmiQueryInterval
+    WMI query polling interval in seconds. Lower values increase responsiveness but also CPU load.
+    Default: 1 second
+
+.PARAMETER HtmlRefreshInterval
+    Seconds between HTML report refreshes. Default: 5 seconds
+
+.PARAMETER RunspaceCheckInterval
+    Seconds between checking runspace health status. Default: 2 seconds
+
+.PARAMETER MaxConcurrentThreads
+    Maximum number of concurrent monitoring threads. Default: 2
+
+.PARAMETER TopItemsCount
+    Number of top users and printers to display in the report. Default: 10
+
+.PARAMETER MaxDocumentNameLength
+    Maximum length for document names in the report before truncation. Default: 40 characters
+
+.PARAMETER FileRetryCount
+    Number of retry attempts when writing to HTML file. Default: 3
+
+.PARAMETER FileRetryDelayMs
+    Delay in milliseconds between file write retry attempts. Default: 300ms
+
+.PARAMETER LogLevel
+    Logging verbosity level: None, Error, Warning, Information, Verbose. Default: Information
+
+.EXAMPLE
+    .\print-job-monitor.ps1
+    Monitors localhost using default settings.
+
+.EXAMPLE
+    .\print-job-monitor.ps1 -ServerConfigs @(@{ServerName='PRINT01';Description='Main Office'}) -Verbose
+    Monitors PRINT01 server with verbose output enabled.
+
+.EXAMPLE
+    $servers = @(
+        @{ServerName='PRINT01'; Description='Building A'},
+        @{ServerName='PRINT02'; Description='Building B'}
+    )
+    .\print-job-monitor.ps1 -ServerConfigs $servers -LogLevel Verbose
+
+.NOTES
+    File Name      : print-job-monitor.ps1
+    Author         : Print Monitoring Team
+    Prerequisite   : PowerShell 5.1 or higher, Active Directory module
+    Copyright      : (c) 2025. All rights reserved.
+
+.LINK
+    https://docs.microsoft.com/en-us/powershell/module/activedirectory/
+#>
+
+[CmdletBinding(DefaultParameterSetName='Default')]
+param(
+    [Parameter(Mandatory=$false, HelpMessage='Array of server configuration hashtables')]
+    [ValidateNotNullOrEmpty()]
+    [hashtable[]]$ServerConfigs = @(
+        @{
+            ServerName = 'localhost'
+            Description = 'Local Print Server'
+        }
+    ),
+
+    [Parameter(Mandatory=$false)]
+    [ValidateScript({
+        if (-not $_ -or (Test-Path -Path (Split-Path -Parent $_) -PathType Container)) {
+            $true
+        } else {
+            throw "Parent directory of HtmlTemplatePath does not exist: $_"
+        }
+    })]
+    [string]$HtmlTemplatePath,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateScript({
+        if (-not $_ -or (Test-Path -Path $_ -PathType Container)) {
+            $true
+        } else {
+            throw "OutputDirectory does not exist: $_"
+        }
+    })]
+    [string]$OutputDirectory,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(1, 60)]
+    [int]$WmiQueryInterval = 1,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(1, 300)]
+    [int]$HtmlRefreshInterval = 5,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(1, 60)]
+    [int]$RunspaceCheckInterval = 2,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(1, 10)]
+    [int]$MaxConcurrentThreads = 2,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(1, 100)]
+    [int]$TopItemsCount = 10,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(10, 200)]
+    [int]$MaxDocumentNameLength = 40,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(1, 10)]
+    [int]$FileRetryCount = 3,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(100, 5000)]
+    [int]$FileRetryDelayMs = 300,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateSet('None', 'Error', 'Warning', 'Information', 'Verbose')]
+    [string]$LogLevel = 'Information'
+)
+
+#Requires -Version 5.1
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# Import Active Directory module if available
+try {
+    Import-Module ActiveDirectory -ErrorAction Stop
 }
-$dateHTML = Get-Date -Format "dd-MM-yyyy"
-$htmlFileBase = Join-Path $outputDirectory "PrintJobsLog-PrintServers-$dateHTML" # Changed filename
-$adCache = @{}  
-$printerCache = @{} 
-$queryInterval = 1  # WMI query polling interval (in seconds) - Lower values increase responsiveness but also load.
-$errorCount = 0
-$recentJobs = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
-$userPrintCounts = [System.Collections.Concurrent.ConcurrentDictionary[string,object]]::new([System.StringComparer]::OrdinalIgnoreCase) # Case-insensitive keys for users
-$printerPrintCounts = [System.Collections.Concurrent.ConcurrentDictionary[string,object]]::new([System.StringComparer]::OrdinalIgnoreCase) # Case-insensitive keys for printers
-$currentDate = Get-Date -Format "yyyy-MM-dd"
-$htmlRefreshInterval = 5  # Seconds between HTML refreshes (reduced for quicker updates)
-$lastHtmlRefresh = [datetime]::MinValue
-$runspaceCheckInterval = 2 # Seconds between checking runspace status
-$lastRunspaceCheck = [datetime]::MinValue
-# Verify HTML template file exists
-if (-not (Test-Path $htmlTemplatePath)) {
-    Write-Error "HTML template file not found at: $htmlTemplatePath"
-    exit 1
+catch {
+    Write-Warning "Active Directory module not available. User lookups will use usernames only."
+    Write-Warning "Error: $($_.Exception.Message)"
 }
-Write-Host "Monitoring Servers:" -ForegroundColor Yellow
-$serverConfigs | ForEach-Object { Write-Host "- $($_.ServerName) ($($_.Description))" }
-Write-Host "Output Directory: $outputDirectory" -ForegroundColor Yellow
-Write-Host "HTML Template: $htmlTemplatePath" -ForegroundColor Yellow
+
+#region Script Configuration
+
+# Script-scoped configuration object
+$script:Config = [PSCustomObject]@{
+    # Paths
+    ScriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
+    HtmlTemplatePath = $null
+    OutputDirectory = $null
+    HtmlFile = $null
+
+    # Server Configuration
+    ServerConfigs = $ServerConfigs
+
+    # Timing Configuration
+    WmiQueryInterval = $WmiQueryInterval
+    HtmlRefreshInterval = $HtmlRefreshInterval
+    RunspaceCheckInterval = $RunspaceCheckInterval
+
+    # Display Configuration
+    TopItemsCount = $TopItemsCount
+    MaxDocumentNameLength = $MaxDocumentNameLength
+    TopUserIcon = '👑'  # Crown emoji (U+1F451)
+    TopPrinterIcon = '👑'  # Crown emoji (U+1F451)
+
+    # File Operation Configuration
+    FileRetryCount = $FileRetryCount
+    FileRetryDelayMs = $FileRetryDelayMs
+
+    # Printer Name Patterns
+    PrinterNameUppercasePatterns = @('^HP', '^bspr')
+
+    # Localization
+    NoJobsMessage = 'לא נמצאו הדפסות ביום הנוכחי'
+
+    # Threading
+    MaxConcurrentThreads = $MaxConcurrentThreads
+
+    # Logging
+    LogLevel = $LogLevel
+
+    # Runtime State
+    CurrentDate = Get-Date -Format 'yyyy-MM-dd'
+    LastHtmlRefresh = [datetime]::MinValue
+    LastRunspaceCheck = [datetime]::MinValue
+}
+
+# Set paths with fallbacks
+$script:Config.OutputDirectory = if ($OutputDirectory) {
+    $OutputDirectory
+} else {
+    $script:Config.ScriptDirectory
+}
+
+$script:Config.HtmlTemplatePath = if ($HtmlTemplatePath) {
+    $HtmlTemplatePath
+} else {
+    Join-Path -Path $script:Config.ScriptDirectory -ChildPath 'template.html'
+}
+
+# Ensure output directory exists
+if (-not (Test-Path -Path $script:Config.OutputDirectory)) {
+    New-Item -ItemType Directory -Path $script:Config.OutputDirectory -Force | Out-Null
+}
+
+# Generate HTML output filename base (will be made unique in Start-PrintJobMonitoring)
+$dateString = Get-Date -Format 'dd-MM-yyyy'
+$script:HtmlFileBase = Join-Path -Path $script:Config.OutputDirectory -ChildPath "PrintJobsLog-PrintServers-$dateString"
+
+# Thread-safe collections
+$script:AdCache = @{}
+$script:PrinterCache = @{}
+$script:RecentJobs = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
+$script:UserPrintCounts = [System.Collections.Concurrent.ConcurrentDictionary[string,object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$script:PrinterPrintCounts = [System.Collections.Concurrent.ConcurrentDictionary[string,object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$script:SyncHash = [hashtable]::Synchronized(@{})
+$script:SyncHash.MessageQueue = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
+
+# Active runspace tracking
+$script:ActiveRunspaces = @{}
+$script:RunspacePool = $null
+
 #endregion
+
+#region Logging Functions
+
+<#
+.SYNOPSIS
+    Writes a log message with specified severity level.
+
+.DESCRIPTION
+    Provides structured logging with configurable severity levels. Messages are written to
+    appropriate PowerShell streams based on severity.
+
+.PARAMETER Message
+    The message to log.
+
+.PARAMETER Level
+    The severity level: Verbose, Information, Warning, or Error.
+
+.PARAMETER ErrorRecord
+    Optional ErrorRecord object for error-level logging.
+
+.EXAMPLE
+    Write-Log -Message "Processing started" -Level Information
+
+.EXAMPLE
+    Write-Log -Message "Failed to connect" -Level Error -ErrorRecord $_
+#>
+function Write-Log {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Message,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateSet('Verbose', 'Information', 'Warning', 'Error')]
+        [string]$Level = 'Information',
+
+        [Parameter(Mandatory=$false)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    # Check if we should output based on configured log level
+    $logLevels = @{
+        'None' = 0
+        'Error' = 1
+        'Warning' = 2
+        'Information' = 3
+        'Verbose' = 4
+    }
+
+    $currentLevel = $logLevels[$script:Config.LogLevel]
+    $messageLevel = $logLevels[$Level]
+
+    if ($messageLevel -gt $currentLevel) {
+        return
+    }
+
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $formattedMessage = "[$timestamp] [$Level] $Message"
+
+    switch ($Level) {
+        'Verbose' {
+            Write-Verbose -Message $formattedMessage
+        }
+        'Information' {
+            Write-Information -MessageData $formattedMessage -InformationAction Continue
+        }
+        'Warning' {
+            Write-Warning -Message $formattedMessage
+        }
+        'Error' {
+            if ($ErrorRecord) {
+                # When ErrorRecord is provided, just output the formatted message as the error text
+                # Don't use -ErrorRecord parameter to avoid parameter set conflicts
+                Write-Error -Message "$formattedMessage`nDetails: $($ErrorRecord.Exception.Message)" -Category $ErrorRecord.CategoryInfo.Category
+            } else {
+                Write-Error -Message $formattedMessage
+            }
+        }
+    }
+}
+
+#endregion
+
 #region Utility Functions
+
+<#
+.SYNOPSIS
+    Generates a unique filename by appending a counter if file exists.
+
+.DESCRIPTION
+    Checks if a file exists at the specified path and appends a numeric counter
+    to create a unique filename if necessary.
+
+.PARAMETER BaseName
+    The base name of the file without extension.
+
+.PARAMETER Extension
+    The file extension without the dot.
+
+.OUTPUTS
+    System.String. The unique filename with full path.
+
+.EXAMPLE
+    Get-UniqueFileName -BaseName "C:\Logs\report" -Extension "html"
+    Returns "C:\Logs\report.html" or "C:\Logs\report.01.html" if file exists.
+#>
 function Get-UniqueFileName {
-    param (
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
         [string]$BaseName,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
         [string]$Extension
     )
+
     $counter = 0
     $newFileName = "$BaseName.$Extension"
-    while (Test-Path -Path $newFileName) {
+
+    while (Test-Path -Path $newFileName -PathType Leaf) {
         $counter++
-        $newFileName = "$BaseName.$($counter.ToString("D2")).$Extension"
+        $newFileName = "$BaseName.$($counter.ToString('D2')).$Extension"
     }
+
+    Write-Log -Message "Generated unique filename: $newFileName" -Level Verbose
     return $newFileName
 }
-$htmlFile = Get-UniqueFileName -BaseName $htmlFileBase -Extension "html"
-Write-Host "HTML Report File: $htmlFile" -ForegroundColor Yellow
-# Cache AD User Information
+
+<#
+.SYNOPSIS
+    Retrieves and caches Active Directory user information.
+
+.DESCRIPTION
+    Looks up user information from Active Directory and caches the results to minimize
+    repeated AD queries. Returns display name and office location.
+
+.PARAMETER SamAccountName
+    The SAM account name of the user to look up.
+
+.OUTPUTS
+    PSCustomObject with DisplayName and Office properties.
+
+.EXAMPLE
+    $userInfo = Get-UserInfo -SamAccountName "jsmith"
+#>
 function Get-UserInfo {
-    param ([string]$SamAccountName)
-    # Normalize the key (e.g., remove domain if present, convert to lower case)
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SamAccountName
+    )
+
+    # Normalize the key (remove domain prefix, convert to lowercase)
     $normalizedKey = ($SamAccountName -split '\\' | Select-Object -Last 1).ToLowerInvariant()
-    if ($adCache.ContainsKey($normalizedKey)) {
-        return $adCache[$normalizedKey]
+
+    # Return cached value if available
+    if ($script:AdCache.ContainsKey($normalizedKey)) {
+        Write-Log -Message "Retrieved cached AD info for user: $normalizedKey" -Level Verbose
+        return $script:AdCache[$normalizedKey]
     }
+
     try {
-        # Limit the properties being retrieved
+        Write-Log -Message "Querying Active Directory for user: $normalizedKey" -Level Verbose
         $user = Get-ADUser -Identity $normalizedKey -Properties DisplayName, Office -ErrorAction Stop
+
         $userInfo = [PSCustomObject]@{
             DisplayName = $user.DisplayName
             Office = $user.Office
         }
-    } catch {
-        # Cache failed lookups too, to avoid repeated attempts for non-AD users/errors
-        $userInfo = [PSCustomObject]@{
-            DisplayName = $SamAccountName # Display original name if lookup fails
-            Office = "Unknown"
-        }
-    }
-    # Add to cache with normalized key
-    $adCache[$normalizedKey] = $userInfo
-    return $userInfo
-}
-# Improved printer cache
-function Get-PrinterName {
-    param(
-        [string]$PrinterName,
-        [string]$ServerName
-    )
-    # Key format: servername:::printername (lowercase)
-    $cacheKey = "$($ServerName):::$($PrinterName)".ToLowerInvariant()
-    if ($printerCache.ContainsKey($cacheKey)) {
-        return $printerCache[$cacheKey]
-    }
-    try {
-        # Use CIM for potentially better performance/reliability over WMI/Get-Printer ?
-        # Or stick with Get-Printer if it works reliably
-        $printer = Get-Printer -Name $PrinterName -ComputerName $ServerName -ErrorAction Stop
-        $printerInfo = [PSCustomObject]@{
-            PrinterName = $printer.Name # Use the name returned by Get-Printer for consistency
-        }
-        $printerCache[$cacheKey] = $printerInfo
-        return $printerInfo
-    } catch {
-        # Cache failed lookups to avoid retries
-        Write-Warning "Could not retrieve details for printer '$PrinterName' on server '$ServerName'. Error: $($_.Exception.Message)"
-        $printerInfo = [PSCustomObject]@{
-            PrinterName = $PrinterName # Return original name on error
-        }
-        $printerCache[$cacheKey] = $printerInfo
-        return $printerInfo
-    }
-}
-function Build-HTMLContent {
-    param (
-        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$UserPrintCounts,
-        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$PrinterPrintCounts,
-        [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$PrintJobs,
-        [string]$TemplatePath
-    )
-    
-    # Read the HTML template with explicit UTF8 encoding
-    try {
-        # Method 1: Using Get-Content with explicit encoding
-        $htmlTemplate = Get-Content -Path $TemplatePath -Raw -Encoding UTF8 -ErrorAction Stop
-        
-        # Alternative Method 2: Using .NET directly if the above doesn't work
-        # $htmlTemplate = [System.IO.File]::ReadAllText($TemplatePath, [System.Text.Encoding]::UTF8)
+
+        Write-Log -Message "Successfully retrieved AD info for user: $normalizedKey" -Level Verbose
     }
     catch {
-        Write-Error "Failed to read HTML template file: $($_.Exception.Message)"
-        # Fallback to a minimal template if the file can't be read
-        $htmlTemplate = "<html><head><meta charset='UTF-8'></head><body><h1>Error: Could not load template</h1><p>Print monitoring data is still being collected.</p></body></html>"
+        Write-Log -Message "Failed to retrieve AD info for user: $normalizedKey. Error: $($_.Exception.Message)" -Level Warning
+
+        # Cache failed lookups to avoid repeated attempts
+        $userInfo = [PSCustomObject]@{
+            DisplayName = $SamAccountName
+            Office = 'Unknown'
+        }
     }
-    
-    # Process users, printers, and jobs as before
-    # ...
-    
-    # Batch process the top users
-    $topUsersHtml = ""
-    # Sort directly on the values within the dictionary entries
-    $topUsers = $UserPrintCounts.GetEnumerator() | Sort-Object { $_.Value.TotalPages } -Descending | Select-Object -First 10
-    $topUserKey = if ($topUsers.Count -gt 0) { $topUsers[0].Key } else { $null }
+
+    # Add to cache
+    $script:AdCache[$normalizedKey] = $userInfo
+    return $userInfo
+}
+
+<#
+.SYNOPSIS
+    Retrieves and caches printer information.
+
+.DESCRIPTION
+    Queries the print server for printer details and caches the results to minimize
+    repeated queries. Returns printer name and related information.
+
+.PARAMETER PrinterName
+    The name of the printer to look up.
+
+.PARAMETER ServerName
+    The print server hosting the printer.
+
+.OUTPUTS
+    PSCustomObject with PrinterName property.
+
+.EXAMPLE
+    $printerInfo = Get-PrinterInfo -PrinterName "HP-LaserJet" -ServerName "PRINT01"
+#>
+function Get-PrinterInfo {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$PrinterName,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ServerName
+    )
+
+    # Create cache key: servername:::printername (lowercase)
+    $cacheKey = "$ServerName:::$PrinterName".ToLowerInvariant()
+
+    # Return cached value if available
+    if ($script:PrinterCache.ContainsKey($cacheKey)) {
+        Write-Log -Message "Retrieved cached printer info: $cacheKey" -Level Verbose
+        return $script:PrinterCache[$cacheKey]
+    }
+
+    try {
+        Write-Log -Message "Querying printer details: $PrinterName on $ServerName" -Level Verbose
+        $printer = Get-Printer -Name $PrinterName -ComputerName $ServerName -ErrorAction Stop
+
+        $printerInfo = [PSCustomObject]@{
+            PrinterName = $printer.Name
+        }
+
+        $script:PrinterCache[$cacheKey] = $printerInfo
+        Write-Log -Message "Successfully retrieved printer info: $cacheKey" -Level Verbose
+        return $printerInfo
+    }
+    catch {
+        Write-Log -Message "Failed to retrieve printer '$PrinterName' on server '$ServerName'. Error: $($_.Exception.Message)" -Level Warning
+
+        # Cache failed lookups
+        $printerInfo = [PSCustomObject]@{
+            PrinterName = $PrinterName
+        }
+
+        $script:PrinterCache[$cacheKey] = $printerInfo
+        return $printerInfo
+    }
+}
+
+<#
+.SYNOPSIS
+    Writes content to a file with retry logic.
+
+.DESCRIPTION
+    Attempts to write content to a file with configurable retry logic to handle
+    transient file system issues. Uses UTF-8 encoding with BOM for proper character support.
+
+.PARAMETER Path
+    The full path to the file to write.
+
+.PARAMETER Content
+    The content to write to the file.
+
+.PARAMETER RetryCount
+    Number of retry attempts. Default from configuration.
+
+.PARAMETER DelayMilliseconds
+    Delay between retry attempts in milliseconds. Default from configuration.
+
+.OUTPUTS
+    System.Boolean. True if write succeeded, False otherwise.
+
+.EXAMPLE
+    $success = Write-FileWithRetry -Path "C:\Reports\output.html" -Content $htmlContent
+#>
+function Write-FileWithRetry {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path,
+
+        [Parameter(Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]$Content,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateRange(1, 10)]
+        [int]$RetryCount = $script:Config.FileRetryCount,
+
+        [Parameter(Mandatory=$false)]
+        [ValidateRange(100, 10000)]
+        [int]$DelayMilliseconds = $script:Config.FileRetryDelayMs
+    )
+
+    for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
+        try {
+            # Ensure parent directory exists
+            $parentDir = Split-Path -Path $Path -Parent
+            if (-not (Test-Path -Path $parentDir -PathType Container)) {
+                New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+                Write-Log -Message "Created directory: $parentDir" -Level Verbose
+            }
+
+            # Write with UTF-8 encoding (with BOM for Hebrew text support)
+            $utf8WithBom = New-Object System.Text.UTF8Encoding $true
+            [System.IO.File]::WriteAllText($Path, $Content, $utf8WithBom)
+
+            Write-Log -Message "Successfully wrote file: $Path" -Level Verbose
+            return $true
+        }
+        catch {
+            $message = "Attempt $attempt of $RetryCount failed to write file '$Path'. Error: $($_.Exception.Message)"
+
+            if ($attempt -lt $RetryCount) {
+                Write-Log -Message $message -Level Warning
+                Start-Sleep -Milliseconds $DelayMilliseconds
+            }
+            else {
+                Write-Log -Message "Failed to write file '$Path' after $RetryCount attempts." -Level Error -ErrorRecord $_
+            }
+        }
+    }
+
+    return $false
+}
+
+<#
+.SYNOPSIS
+    Applies printer name formatting rules.
+
+.DESCRIPTION
+    Converts printer names to uppercase if they match configured patterns.
+
+.PARAMETER PrinterName
+    The printer name to format.
+
+.OUTPUTS
+    System.String. The formatted printer name.
+
+.EXAMPLE
+    $formatted = Format-PrinterName -PrinterName "hp-laserjet-01"
+    Returns "HP-LASERJET-01"
+#>
+function Format-PrinterName {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$PrinterName
+    )
+
+    foreach ($pattern in $script:Config.PrinterNameUppercasePatterns) {
+        if ($PrinterName -match $pattern) {
+            return $PrinterName.ToUpper()
+        }
+    }
+
+    return $PrinterName
+}
+
+#endregion
+
+#region HTML Generation
+
+<#
+.SYNOPSIS
+    Builds the complete HTML report content.
+
+.DESCRIPTION
+    Generates the HTML report by processing user statistics, printer statistics,
+    and recent print jobs. Replaces placeholders in the HTML template with actual data.
+
+.PARAMETER UserPrintCounts
+    Concurrent dictionary containing user print statistics.
+
+.PARAMETER PrinterPrintCounts
+    Concurrent dictionary containing printer print statistics.
+
+.PARAMETER PrintJobs
+    Concurrent queue containing recent print job records.
+
+.PARAMETER TemplatePath
+    Path to the HTML template file.
+
+.OUTPUTS
+    System.String. The complete HTML content ready to write to file.
+
+.EXAMPLE
+    $html = Build-HtmlContent -UserPrintCounts $userCounts -PrinterPrintCounts $printerCounts -PrintJobs $jobs -TemplatePath $templatePath
+#>
+function Build-HtmlContent {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$UserPrintCounts,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$PrinterPrintCounts,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$PrintJobs,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$TemplatePath
+    )
+
+    Write-Log -Message "Building HTML content from template: $TemplatePath" -Level Verbose
+
+    # Read HTML template
+    try {
+        $htmlTemplate = Get-Content -Path $TemplatePath -Raw -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        Write-Log -Message "Failed to read HTML template file: $($_.Exception.Message)" -Level Error -ErrorRecord $_
+
+        # Fallback minimal template
+        $htmlTemplate = @"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset='UTF-8'>
+    <title>Print Job Monitor - Error</title>
+</head>
+<body>
+    <h1>Error: Could not load template</h1>
+    <p>Print monitoring data is still being collected.</p>
+</body>
+</html>
+"@
+    }
+
+    # Build top users HTML
+    $topUsersHtml = Build-TopUsersHtml -UserPrintCounts $UserPrintCounts
+
+    # Build top printers HTML
+    $topPrintersHtml = Build-TopPrintersHtml -PrinterPrintCounts $PrinterPrintCounts
+
+    # Build print jobs HTML
+    $printJobsHtml = Build-PrintJobsHtml -PrintJobs $PrintJobs
+
+    # Replace placeholders
+    $htmlContent = $htmlTemplate -replace '\{\{topUsersHtml\}\}', $topUsersHtml
+    $htmlContent = $htmlContent -replace '\{\{topPrintersHtml\}\}', $topPrintersHtml
+    $htmlContent = $htmlContent -replace '\{\{printJobsHtml\}\}', $printJobsHtml
+
+    Write-Log -Message "HTML content built successfully" -Level Verbose
+    return $htmlContent
+}
+
+<#
+.SYNOPSIS
+    Builds the HTML table rows for top users.
+
+.DESCRIPTION
+    Creates HTML table rows showing top users by pages printed, including crown icon for top user.
+
+.PARAMETER UserPrintCounts
+    Concurrent dictionary containing user print statistics.
+
+.OUTPUTS
+    System.String. HTML table rows for top users.
+#>
+function Build-TopUsersHtml {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$UserPrintCounts
+    )
+
+    $htmlBuilder = [System.Text.StringBuilder]::new()
+
+    # Debug: Log dictionary count
+    Write-Log -Message "Building Top Users HTML. Dictionary has $($UserPrintCounts.Count) entries." -Level Verbose
+
+    # Get all entries and filter/sort safely
+    $topUsers = @($UserPrintCounts.GetEnumerator() |
+        Where-Object { $_.Value -ne $null } |
+        Sort-Object {
+            try {
+                # Use bracket notation for hashtable access
+                if ($null -ne $_.Value['TotalPages']) {
+                    [int]$_.Value['TotalPages']
+                } else {
+                    0
+                }
+            } catch {
+                0
+            }
+        } -Descending |
+        Select-Object -First $script:Config.TopItemsCount)
+
+    Write-Log -Message "Top Users after filtering: $($topUsers.Count) entries" -Level Verbose
+
+    if ($topUsers.Count -eq 0) {
+        Write-Log -Message "No top users to display (count is 0)" -Level Verbose
+        return $htmlBuilder.ToString()
+    }
+
+    $topUserKey = $topUsers[0].Key
+
     foreach ($userEntry in $topUsers) {
-        $userKey = $userEntry.Key
-        $userData = $userEntry.Value
-        $crownIcon = ""
-        if ($userKey -eq $topUserKey) {
-            $crownIcon = "👑" # Changed icon
+        try {
+            $userKey = $userEntry.Key
+            $userData = $userEntry.Value
+
+            # Skip null data
+            if (-not $userData) {
+                Write-Log -Message "Skipping user entry with null data for key: $userKey" -Level Verbose
+                continue
+            }
+
+            # Debug: Log the type and content
+            $dataType = $userData.GetType().Name
+            Write-Log -Message "Processing user '$userKey': Type=$dataType" -Level Verbose
+
+            # Access hashtable values using bracket notation for reliability across runspaces
+            $totalJobs = $userData['TotalJobs']
+            $totalPages = $userData['TotalPages']
+
+            Write-Log -Message "User '$userKey': Jobs=$totalJobs, Pages=$totalPages (accessed via bracket notation)" -Level Verbose
+
+            $crownIcon = if ($userKey -eq $topUserKey) { $script:Config.TopUserIcon } else { '' }
+            $userInfo = Get-UserInfo -SamAccountName $userKey
+
+            $null = $htmlBuilder.AppendLine("<tr>")
+            $null = $htmlBuilder.AppendLine("    <td class='highlight' title='$($userInfo.Office)'>$crownIcon $($userInfo.DisplayName)</td>")
+            $null = $htmlBuilder.AppendLine("    <td>$totalJobs</td>")
+            $null = $htmlBuilder.AppendLine("    <td>$totalPages</td>")
+            $null = $htmlBuilder.AppendLine("</tr>")
         }
-        # Use the cached Get-UserInfo function
-        $userInfo = Get-UserInfo -SamAccountName $userKey
-        $topUsersHtml += "<tr>
-        <td class='highlight' title='$($userInfo.Office)'>$crownIcon $($userInfo.DisplayName)</td>
-        <td>$($userData.TotalJobs)</td>
-        <td>$($userData.TotalPages)</td>
-        </tr>"
+        catch {
+            # Log the error for debugging
+            Write-Log -Message "Error processing top user entry: $($_.Exception.Message)" -Level Warning
+            continue
+        }
     }
-    
-    # Batch process the top printers
-    $topPrintersHtml = ""
-    $topPrinters = $PrinterPrintCounts.GetEnumerator() | Sort-Object { $_.Value.TotalPages } -Descending | Select-Object -First 10
-    $topPrinterKey = if ($topPrinters.Count -gt 0) { $topPrinters[0].Key } else { $null }
+
+    return $htmlBuilder.ToString()
+}
+
+<#
+.SYNOPSIS
+    Builds the HTML table rows for top printers.
+
+.DESCRIPTION
+    Creates HTML table rows showing top printers by pages printed, including crown icon for top printer.
+
+.PARAMETER PrinterPrintCounts
+    Concurrent dictionary containing printer print statistics.
+
+.OUTPUTS
+    System.String. HTML table rows for top printers.
+#>
+function Build-TopPrintersHtml {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$PrinterPrintCounts
+    )
+
+    $htmlBuilder = [System.Text.StringBuilder]::new()
+
+    # Debug: Log dictionary count
+    Write-Log -Message "Building Top Printers HTML. Dictionary has $($PrinterPrintCounts.Count) entries." -Level Verbose
+
+    # Get all entries and filter/sort safely
+    $topPrinters = @($PrinterPrintCounts.GetEnumerator() |
+        Where-Object { $_.Value -ne $null } |
+        Sort-Object {
+            try {
+                # Use bracket notation for hashtable access
+                if ($null -ne $_.Value['TotalPages']) {
+                    [int]$_.Value['TotalPages']
+                } else {
+                    0
+                }
+            } catch {
+                0
+            }
+        } -Descending |
+        Select-Object -First $script:Config.TopItemsCount)
+
+    Write-Log -Message "Top Printers after filtering: $($topPrinters.Count) entries" -Level Verbose
+
+    if ($topPrinters.Count -eq 0) {
+        Write-Log -Message "No top printers to display (count is 0)" -Level Verbose
+        return $htmlBuilder.ToString()
+    }
+
+    $topPrinterKey = $topPrinters[0].Key
+
     foreach ($printerEntry in $topPrinters) {
-        $printerKey = $printerEntry.Key
-        $printerData = $printerEntry.Value
-        $crownIcon = ""
-        if ($printerKey -eq $topPrinterKey) {
-            $crownIcon = "👑" # Changed icon
+        try {
+            $printerKey = $printerEntry.Key
+            $printerData = $printerEntry.Value
+
+            # Skip null data
+            if (-not $printerData) {
+                continue
+            }
+
+            # Access hashtable values using bracket notation for reliability across runspaces
+            $totalJobs = $printerData['TotalJobs']
+            $totalPages = $printerData['TotalPages']
+
+            Write-Log -Message "Printer '$printerKey': Jobs=$totalJobs, Pages=$totalPages (accessed via bracket notation)" -Level Verbose
+
+            $crownIcon = if ($printerKey -eq $topPrinterKey) { $script:Config.TopPrinterIcon } else { '' }
+
+            # Extract server and printer name from combined key (server:::printer)
+            $parts = $printerKey -split ':::'
+            $printerNameOnly = if ($parts.Count -ge 2) { $parts[1] } else { $printerKey }
+            $serverNameOnly = if ($parts.Count -ge 2) { $parts[0] } else { 'Unknown' }
+
+            $displayPrinterName = Format-PrinterName -PrinterName $printerNameOnly
+
+            $null = $htmlBuilder.AppendLine("<tr>")
+            $null = $htmlBuilder.AppendLine("    <td class='highlight'>$displayPrinterName $crownIcon</td>")
+            $null = $htmlBuilder.AppendLine("    <td>$totalJobs</td>")
+            $null = $htmlBuilder.AppendLine("    <td>$totalPages</td>")
+            $null = $htmlBuilder.AppendLine("    <td>$serverNameOnly</td>")
+            $null = $htmlBuilder.AppendLine("</tr>")
         }
-        # Extract server name and printer name from combined key
-        $parts = $printerKey -split ":::"
-        $printerNameOnly = $parts[1] # Assuming key is server:::printer
-        $serverNameOnly = $parts[0]
-        
-        
-        # Convert the printer name to uppercase if it starts with HP
-        $displayPrinterName = if ($printerNameOnly -match '^(HP)') {
-            $printerNameOnly.ToUpper()
-        } else {
-            $printerNameOnly
+        catch {
+            # Log the error for debugging
+            Write-Log -Message "Error processing top printer entry: $($_.Exception.Message)" -Level Warning
+            continue
         }
-        
-        $topPrintersHtml += "<tr>
-        <td class='highlight'>$displayPrinterName $crownIcon</td>
-        <td>$($printerData.TotalJobs)</td>
-        <td>$($printerData.TotalPages)</td>
-        <td>$serverNameOnly</td>
-        </tr>"
     }
-    
-    # Convert queue to array for processing and sort by time with newest first
+
+    return $htmlBuilder.ToString()
+}
+
+<#
+.SYNOPSIS
+    Builds the HTML table rows for recent print jobs.
+
+.DESCRIPTION
+    Creates HTML table rows showing recent print jobs with user, document, printer, and timestamp information.
+
+.PARAMETER PrintJobs
+    Concurrent queue containing recent print job records.
+
+.OUTPUTS
+    System.String. HTML table rows for print jobs.
+#>
+function Build-PrintJobsHtml {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$PrintJobs
+    )
+
+    $htmlBuilder = [System.Text.StringBuilder]::new()
+
+    # Convert queue to array and sort by time (newest first)
     $jobArray = $PrintJobs.ToArray() | Sort-Object {
-        # Parse the date string into a DateTime object for proper sorting
-        if($_.Time -match '(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2})') {
+        if ($_.Time -match '(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2})') {
             Get-Date -Year $matches[3] -Month $matches[2] -Day $matches[1] -Hour $matches[4] -Minute $matches[5]
-        } else {
+        }
+        else {
             [DateTime]::MinValue
         }
     } -Descending
-    
-    # Create a HashSet to track unique jobs we've already processed
-    # This prevents duplicate jobs but allows multiple jobs from same user
+
+    # Track unique jobs to prevent duplicates
     $processedJobs = New-Object System.Collections.Generic.HashSet[string]
-    
-    # Batch process the print jobs
-    $printJobsHtml = ""
+
     foreach ($job in $jobArray) {
-        # Each job needs a unique identifier - either use the JobKey if available or create one
-        $uniqueJobId = if ($job.JobKey) { $job.JobKey } else { "$($job.User)-$($job.JobId)-$($job.Time)" }
-        
-        # Only process this job if we haven't seen it before
-        if ($processedJobs.Add($uniqueJobId)) {
-            # Use cached Get-UserInfo
-            $userInfo = Get-UserInfo -SamAccountName $job.User
-            
-            $documentName = $job.Document
-            if ($documentName.Length -gt 40) {
-                $documentName = $documentName.Substring(0, 37) + "..."
-                # Store the full document name as a tooltip
-                $documentTooltip = "title='$($job.Document)'"
-            } else {
-                $documentTooltip = ""
-            }
-            
-            $displayPrinterName = if ($job.Printer -match '^(bspr)') {
-                $job.Printer.ToUpper()
-            } else {
-                $job.Printer
-            }
-            
-            $printJobsHtml += "<tr>
-                <td>$($job.Time)</td>
-                <td title='$($userInfo.Office)'>$($userInfo.DisplayName)</td>
-                <td $documentTooltip>$documentName</td>
-                <td>$($job.Pages)</td>
-                <td>$displayPrinterName</td>
-                <td>$($job.Server)</td>
-            </tr>"
+        # Create unique job identifier
+        $uniqueJobId = if ($job.JobKey) {
+            $job.JobKey
+        } else {
+            "$($job.User)-$($job.JobId)-$($job.Time)"
         }
-    }
-    
-    # Add a fallback message if no print jobs found
-    if ($printJobsHtml -eq "") {
-        $printJobsHtml = "<tr><td colspan='6' class='highlight' style='text-align:center;'>לא נמצאו הדפסות ביום הנוכחי</td></tr>"
-    }
-    
-    # Replace placeholders in template with actual data
-    $htmlContent = $htmlTemplate -replace '{{topUsersHtml}}', $topUsersHtml
-    $htmlContent = $htmlContent -replace '{{topPrintersHtml}}', $topPrintersHtml
-    $htmlContent = $htmlContent -replace '{{printJobsHtml}}', $printJobsHtml
-    
-    return $htmlContent
-}
-function Safe-WriteToFile {
-    param (
-        [string]$Path,
-        [string]$Content,
-        [int]$RetryCount = 3,
-        [int]$DelayMilliseconds = 300
-    )
-    for ($i = 1; $i -le $RetryCount; $i++) {
-        try {
-            # Ensure directory exists
-            $Dir = Split-Path $Path -Parent
-            if (-not (Test-Path $Dir)) {
-                New-Item -ItemType Directory -Path $Dir -Force | Out-Null
-            }
-            
-            # Use UTF8 encoding with BOM (important for Hebrew text)
-            $utf8WithBom = New-Object System.Text.UTF8Encoding $true
-            [System.IO.File]::WriteAllText($Path, $Content, $utf8WithBom)
-            
-            # Alternative method if above doesn't work:
-            # $Content | Out-File -FilePath $Path -Encoding UTF8 -Force
-            
-            return $true # Indicate success
-        } catch {
-            Write-Warning "Attempt $i : Unable to write to file $Path. Error : $($_.Exception.Message)"
-            if ($i -lt $RetryCount) {
-                Start-Sleep -Milliseconds $DelayMilliseconds
-            }
+
+        # Skip if already processed
+        if (-not $processedJobs.Add($uniqueJobId)) {
+            continue
         }
+
+        # Get user information
+        $userInfo = Get-UserInfo -SamAccountName $job.User
+
+        # Truncate long document names
+        $documentName = $job.Document
+        $documentTooltip = ''
+
+        if ($documentName.Length -gt $script:Config.MaxDocumentNameLength) {
+            $documentName = $documentName.Substring(0, $script:Config.MaxDocumentNameLength - 3) + '...'
+            $documentTooltip = "title='$($job.Document)'"
+        }
+
+        # Format printer name
+        $displayPrinterName = Format-PrinterName -PrinterName $job.Printer
+
+        $null = $htmlBuilder.AppendLine("<tr>")
+        $null = $htmlBuilder.AppendLine("    <td>$($job.Time)</td>")
+        $null = $htmlBuilder.AppendLine("    <td title='$($userInfo.Office)'>$($userInfo.DisplayName)</td>")
+        $null = $htmlBuilder.AppendLine("    <td $documentTooltip>$documentName</td>")
+        $null = $htmlBuilder.AppendLine("    <td>$($job.Pages)</td>")
+        $null = $htmlBuilder.AppendLine("    <td>$displayPrinterName</td>")
+        $null = $htmlBuilder.AppendLine("    <td>$($job.Server)</td>")
+        $null = $htmlBuilder.AppendLine("</tr>")
     }
-    Write-Error "Failed to write to file $Path after $RetryCount attempts."
-    return $false # Indicate failure
+
+    # Add fallback message if no jobs found
+    if ($htmlBuilder.Length -eq 0) {
+        $null = $htmlBuilder.AppendLine("<tr>")
+        $null = $htmlBuilder.AppendLine("    <td colspan='6' class='highlight' style='text-align:center;'>$($script:Config.NoJobsMessage)</td>")
+        $null = $htmlBuilder.AppendLine("</tr>")
+    }
+
+    return $htmlBuilder.ToString()
 }
-#endregion
-#region Parallel Monitoring Logic
-# Modify the scriptBlock to use a more compatible approach
-$scriptBlock = {
+
+<#
+.SYNOPSIS
+    Updates the HTML report file if the refresh interval has elapsed.
+
+.DESCRIPTION
+    Checks if enough time has passed since the last HTML update and regenerates
+    the HTML file if necessary.
+
+.PARAMETER LastRefreshTime
+    DateTime of the last HTML refresh.
+
+.PARAMETER RefreshIntervalSeconds
+    Minimum seconds between refreshes.
+
+.PARAMETER OutputFile
+    Path to the HTML output file.
+
+.PARAMETER UserCounts
+    User print statistics dictionary.
+
+.PARAMETER PrinterCounts
+    Printer print statistics dictionary.
+
+.PARAMETER JobsQueue
+    Recent print jobs queue.
+
+.PARAMETER HtmlTemplatePath
+    Path to HTML template file.
+
+.OUTPUTS
+    System.DateTime. The updated last refresh time.
+
+.EXAMPLE
+    $lastRefresh = Update-HtmlIfNeeded -LastRefreshTime $lastRefresh -RefreshIntervalSeconds 5 -OutputFile $htmlFile -UserCounts $userCounts -PrinterCounts $printerCounts -JobsQueue $recentJobs -HtmlTemplatePath $templatePath
+#>
+function Update-HtmlIfNeeded {
+    [CmdletBinding()]
+    [OutputType([datetime])]
     param(
-        [string]$ServerName,
-        [Parameter(Mandatory=$true)][System.Collections.Concurrent.ConcurrentDictionary[string,object]]$UserPrintCounts,
-        [Parameter(Mandatory=$true)][System.Collections.Concurrent.ConcurrentDictionary[string,object]]$PrinterPrintCounts,
-        [Parameter(Mandatory=$true)][System.Collections.Concurrent.ConcurrentQueue[hashtable]]$RecentJobs,
-        [int]$WmiQueryInterval, # Pass interval to the scriptblock
-        [hashtable]$SyncHash # Add this parameter for communication with main thread
+        [Parameter(Mandatory=$true)]
+        [datetime]$LastRefreshTime,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateRange(1, 300)]
+        [int]$RefreshIntervalSeconds,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$OutputFile,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$UserCounts,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$PrinterCounts,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$JobsQueue,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$HtmlTemplatePath
     )
-    # Function to send message back to main thread
+
+    $currentTime = Get-Date
+    $elapsedSeconds = ($currentTime - $LastRefreshTime).TotalSeconds
+
+    if ($elapsedSeconds -ge $RefreshIntervalSeconds) {
+        Write-Log -Message "HTML refresh interval reached ($elapsedSeconds seconds). Generating HTML report." -Level Verbose
+
+        try {
+            $htmlContent = Build-HtmlContent `
+                -UserPrintCounts $UserCounts `
+                -PrinterPrintCounts $PrinterCounts `
+                -PrintJobs $JobsQueue `
+                -TemplatePath $HtmlTemplatePath
+
+            if (Write-FileWithRetry -Path $OutputFile -Content $htmlContent) {
+                Write-Log -Message "HTML report updated successfully: $OutputFile" -Level Information
+                return $currentTime
+            }
+            else {
+                Write-Log -Message "Failed to write HTML report after retries: $OutputFile" -Level Warning
+                return $LastRefreshTime
+            }
+        }
+        catch {
+            Write-Log -Message "Error generating HTML report: $($_.Exception.Message)" -Level Error -ErrorRecord $_
+            return $LastRefreshTime
+        }
+    }
+
+    return $LastRefreshTime
+}
+
+#endregion
+
+#region Parallel Monitoring
+
+<#
+.SYNOPSIS
+    Script block that runs in a separate runspace to monitor a print server.
+
+.DESCRIPTION
+    This script block is executed in parallel for each print server being monitored.
+    It creates a WMI event watcher for print job events and processes them in real-time.
+#>
+$script:MonitoringScriptBlock = {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$ServerName,
+
+        [Parameter(Mandatory=$true)]
+        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$UserPrintCounts,
+
+        [Parameter(Mandatory=$true)]
+        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$PrinterPrintCounts,
+
+        [Parameter(Mandatory=$true)]
+        [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$RecentJobs,
+
+        [Parameter(Mandatory=$true)]
+        [int]$WmiQueryInterval,
+
+        [Parameter(Mandatory=$true)]
+        [hashtable]$SyncHash
+    )
+
+    # Function to send messages back to main thread
     function Send-MessageToMainThread {
-        param([string]$Message, [string]$Color = "White")
-        
-        # Add message to the synchronized queue
+        param(
+            [string]$Message,
+            [string]$Color = 'White'
+        )
+
         $SyncHash.MessageQueue.Enqueue(@{
             Message = $Message
             Color = $Color
             Timestamp = Get-Date
         })
     }
-    
-    # Use a boolean flag for cancellation
+
+    # Initialize stop flag
     $stopRequested = $false
     $SyncHash["StopFlag-$ServerName"] = [ref]$stopRequested
-    
-    # Register event handler within the runspace for cleanup
+
+    # Register stop event handler
     $eventAction = {
         param($Sender, $EventArgs)
-        
-        # Access the stop flag via synchronized hashtable
+
         $serverName = $EventArgs.MessageData.ServerName
         $stopFlag = $EventArgs.MessageData.StopFlag
         $sendMessageFunction = $EventArgs.MessageData.SendMessageFunction
-        
-        # Log the stop request
-        & $sendMessageFunction -Message "[$serverName] Stop event received." -Color "Yellow"
-        
-        # Set the stop flag to true
+
+        & $sendMessageFunction -Message "[$serverName] Stop event received." -Color 'Yellow'
         $stopFlag.Value = $true
     }
-    
-    # Register with event args that contain needed data
+
     $messageData = @{
         ServerName = $ServerName
         StopFlag = [ref]$stopRequested
         SendMessageFunction = ${function:Send-MessageToMainThread}
     }
-    
+
     $null = Register-EngineEvent -SourceIdentifier "StopRunspace-$ServerName" -Action $eventAction -MessageData $messageData
-    
+
+    # Initialize WMI watcher
     $watcher = $null
     $options = New-Object System.Management.EventWatcherOptions
-    # Set a timeout so the loop can check for cancellation
     $options.Timeout = [TimeSpan]::FromSeconds(2)
-    
+
     try {
-        Send-MessageToMainThread -Message "[$ServerName] Initializing WMI watcher..." -Color "Cyan"
+        Send-MessageToMainThread -Message "[$ServerName] Initializing WMI event watcher..." -Color 'Cyan'
+
         $query = "SELECT * FROM __InstanceCreationEvent WITHIN $WmiQueryInterval WHERE TargetInstance ISA 'Win32_PrintJob'"
-        $scope = New-Object System.Management.ManagementScope ("\\$ServerName\root\cimv2")
-        $scope.Connect() # Explicitly connect
+        $scope = New-Object System.Management.ManagementScope("\\$ServerName\root\cimv2")
+        $scope.Connect()
+
         $watcher = New-Object System.Management.ManagementEventWatcher($scope, $query)
         $watcher.Options = $options
-        Send-MessageToMainThread -Message "[$ServerName] Watcher created. Starting event loop..." -Color "Cyan"
-        
-        # Process print jobs loop
-        while (-not $stopRequested) { 
+
+        Send-MessageToMainThread -Message "[$ServerName] WMI watcher initialized successfully. Starting monitoring loop..." -Color 'Green'
+
+        # Main event processing loop
+        while (-not $stopRequested) {
             try {
-                # Check for cancellation before waiting for event
                 if ($stopRequested) {
-                    Send-MessageToMainThread -Message "[$ServerName] Stop requested before WaitForNextEvent." -Color "Yellow"
+                    Send-MessageToMainThread -Message "[$ServerName] Stop requested before WaitForNextEvent." -Color 'Yellow'
                     break
                 }
-                
-                # WaitForNextEvent with timeout (set in options above)
+
                 $event = $watcher.WaitForNextEvent()
-                
-                # Check for cancellation after event wait completes
+
                 if ($stopRequested) {
-                    Send-MessageToMainThread -Message "[$ServerName] Stop requested after WaitForNextEvent." -Color "Yellow"
+                    Send-MessageToMainThread -Message "[$ServerName] Stop requested after WaitForNextEvent." -Color 'Yellow'
                     if ($event) { $event.Dispose() }
                     break
                 }
-                
+
                 if ($event) {
                     $job = $event.TargetInstance
-                    
-                    # Defensive programming: Check if job properties exist
-                    $printerName = if ($job.Name) { $job.Name -split "," | Select-Object -First 1 } else { "UnknownPrinter" }
-                    $userName = if ($job.Owner) { $job.Owner } else { "UnknownUser" }
-                    $documentName = if ($job.Document) { $job.Document } else { "UnknownDocument" }
-                    $timeStamp = Get-Date -Format "dd-MM-yyyy HH:mm" # Consistent format
-                    
-                    # Handle potential 0 pages (e.g., paused jobs initially?) Default to 1.
+
+                    # Extract job properties with defensive checks
+                    $printerName = if ($job.Name) {
+                        ($job.Name -split ',' | Select-Object -First 1)
+                    } else {
+                        'UnknownPrinter'
+                    }
+
+                    $userName = if ($job.Owner) { $job.Owner } else { 'UnknownUser' }
+                    $documentName = if ($job.Document) { $job.Document } else { 'UnknownDocument' }
+                    $timeStamp = Get-Date -Format 'dd-MM-yyyy HH:mm'
                     $pageCount = if ($job.TotalPages -and $job.TotalPages -gt 0) { $job.TotalPages } else { 1 }
-                    
-                    # Get the Job ID for uniqueness
                     $jobId = if ($job.JobId) { $job.JobId } else { [Guid]::NewGuid().ToString() }
-                    
-                    # Send message to main thread for console display
-                    Send-MessageToMainThread -Message "[$ServerName] New Print Job: User=$userName, Printer=$printerName, Pages=$pageCount, Document=$documentName" -Color "Green"
-                    
-                    # Use lowercase for dictionary keys for consistency
+
+                    Send-MessageToMainThread -Message "[$ServerName] New Print Job: User=$userName, Printer=$printerName, Pages=$pageCount, Document=$documentName" -Color 'Green'
+
+                    # Normalize keys for dictionary operations
                     $normalizedUserName = ($userName -split '\\' | Select-Object -Last 1).ToLowerInvariant()
-                    
-                    $printerKey = "$($ServerName):::$($printerName)".ToLowerInvariant()
+                    $printerKey = "$ServerName:::$printerName".ToLowerInvariant()
                     $uniqueId = [Guid]::NewGuid().ToString()
                     $jobKey = "$normalizedUserName-$jobId-$uniqueId"
-                    
-                    $null = $UserPrintCounts.AddOrUpdate(
-                        $normalizedUserName,
-                        { 
-                            [PSCustomObject]@{ 
+
+                    # Capture page count for use in updates
+                    $currentPageCount = $pageCount
+
+                    # Update user statistics using TryGetValue/TryAdd/TryUpdate pattern
+                    # This avoids scriptblock-to-delegate conversion issues
+                    $userUpdated = $false
+                    do {
+                        $existingUserValue = $null
+                        if ($UserPrintCounts.TryGetValue($normalizedUserName, [ref]$existingUserValue)) {
+                            # Update existing entry
+                            $newUserValue = @{
+                                TotalJobs = $existingUserValue['TotalJobs'] + 1
+                                TotalPages = $existingUserValue['TotalPages'] + $currentPageCount
+                            }
+                            $userUpdated = $UserPrintCounts.TryUpdate($normalizedUserName, $newUserValue, $existingUserValue)
+                        } else {
+                            # Add new entry
+                            $newUserValue = @{
                                 TotalJobs = 1
-                                TotalPages = $pageCount 
+                                TotalPages = $currentPageCount
                             }
-                        },
-                        { 
-                            param($key, $existingValue)
-                            [PSCustomObject]@{
-                                TotalJobs = $existingValue.TotalJobs + 1
-                                TotalPages = $existingValue.TotalPages + $pageCount
-                            }
+                            $userUpdated = $UserPrintCounts.TryAdd($normalizedUserName, $newUserValue)
                         }
-                    )
-                    $null = $PrinterPrintCounts.AddOrUpdate(
-                        $printerKey,
-                        { 
-                            [PSCustomObject]@{ 
+                    } while (-not $userUpdated)
+
+                    Send-MessageToMainThread -Message "[$ServerName] User stats for '$normalizedUserName': Type=$($newUserValue.GetType().Name), Jobs=$($newUserValue['TotalJobs']), Pages=$($newUserValue['TotalPages'])" -Color 'Cyan'
+
+                    # Update printer statistics using same pattern
+                    $printerUpdated = $false
+                    do {
+                        $existingPrinterValue = $null
+                        if ($PrinterPrintCounts.TryGetValue($printerKey, [ref]$existingPrinterValue)) {
+                            # Update existing entry
+                            $newPrinterValue = @{
+                                TotalJobs = $existingPrinterValue['TotalJobs'] + 1
+                                TotalPages = $existingPrinterValue['TotalPages'] + $currentPageCount
+                            }
+                            $printerUpdated = $PrinterPrintCounts.TryUpdate($printerKey, $newPrinterValue, $existingPrinterValue)
+                        } else {
+                            # Add new entry
+                            $newPrinterValue = @{
                                 TotalJobs = 1
-                                TotalPages = $pageCount 
+                                TotalPages = $currentPageCount
                             }
-                        },
-                        { 
-                            param($key, $existingValue)
-                            [PSCustomObject]@{
-                                TotalJobs = $existingValue.TotalJobs + 1
-                                TotalPages = $existingValue.TotalPages + $pageCount
-                            }
+                            $printerUpdated = $PrinterPrintCounts.TryAdd($printerKey, $newPrinterValue)
                         }
-                    )
-                    
-                    # --- Add to Recent Jobs Queue (Thread-Safe) ---
+                    } while (-not $printerUpdated)
+
+                    Send-MessageToMainThread -Message "[$ServerName] Printer stats for '$printerKey': Type=$($newPrinterValue.GetType().Name), Jobs=$($newPrinterValue['TotalJobs']), Pages=$($newPrinterValue['TotalPages'])" -Color 'Cyan'
+
+                    # Add to recent jobs queue
                     $newJobEntry = @{
                         Server = $ServerName
-                        Printer = $printerName 
+                        Printer = $printerName
                         Pages = $pageCount
                         Document = $documentName
-                        User = $userName 
+                        User = $userName
                         Time = $timeStamp
                         JobId = $jobId
                         JobKey = $jobKey
                     }
-                    
-                    # Enqueue the new job
+
                     $RecentJobs.Enqueue($newJobEntry)
-                    Send-MessageToMainThread -Message "[$ServerName] Job processed: User='$userName', Printer='$printerName', Pages=$pageCount, JobID=$jobId" -Color "Cyan"
+                    Send-MessageToMainThread -Message "[$ServerName] Job processed successfully: JobID=$jobId" -Color 'Cyan'
+
                     $event.Dispose()
                 }
-            } catch {
-                # Check for timeout message which is expected behavior
-                if ($_.Exception.Message -like "*Timed out*") {
-                    # This is the expected timeout from our 2-second timer
-                    # Just continue the loop silently to check for cancellation
+            }
+            catch {
+                # Expected timeout is normal behavior
+                if ($_.Exception.Message -like '*Timed out*') {
                     continue
-                } else {
-                    Send-MessageToMainThread -Message "[$ServerName] Error during event watch loop: $($_.Exception.Message)" -Color "Red"
-                    # Check if we should exit due to stop flag
+                }
+                else {
+                    Send-MessageToMainThread -Message "[$ServerName] Error in event processing loop: $($_.Exception.Message)" -Color 'Red'
+
                     if ($stopRequested) {
                         break
                     }
-                    Start-Sleep -Seconds 2 # Pause before retrying after error
+
+                    Start-Sleep -Seconds 2
                 }
             }
         }
-    } catch {
-        Send-MessageToMainThread -Message "[$ServerName] Failed to initialize WMI watcher. Error: $($_.Exception.Message)" -Color "Red"
-        throw $_
-    } finally {
-        Send-MessageToMainThread -Message "[$ServerName] Runspace is shutting down..." -Color "Yellow"
+    }
+    catch {
+        Send-MessageToMainThread -Message "[$ServerName] Failed to initialize WMI watcher: $($_.Exception.Message)" -Color 'Red'
+        throw
+    }
+    finally {
+        Send-MessageToMainThread -Message "[$ServerName] Runspace shutting down..." -Color 'Yellow'
+
         if ($watcher) {
-            Send-MessageToMainThread -Message "[$ServerName] Stopping and disposing watcher in finally block." -Color "Yellow"
-            try { $watcher.Stop() } catch {}
-            try { $watcher.Dispose() } catch {}
+            Send-MessageToMainThread -Message "[$ServerName] Stopping and disposing WMI watcher..." -Color 'Yellow'
+            try { $watcher.Stop() } catch { }
+            try { $watcher.Dispose() } catch { }
         }
+
         Unregister-EngineEvent -SourceIdentifier "StopRunspace-$ServerName" -ErrorAction SilentlyContinue
-        Send-MessageToMainThread -Message "[$ServerName] Runspace script block finished." -Color "Yellow"
+        Send-MessageToMainThread -Message "[$ServerName] Runspace cleanup completed." -Color 'Yellow'
     }
 }
 
-# Function to start or restart monitoring for a single server
+<#
+.SYNOPSIS
+    Starts a monitoring runspace for a single print server.
+
+.DESCRIPTION
+    Creates and initializes a PowerShell runspace that monitors print jobs on the specified server.
+
+.PARAMETER ServerConfig
+    Hashtable containing ServerName and Description.
+
+.PARAMETER RunspacePool
+    The runspace pool to use for the new runspace.
+
+.PARAMETER UserPrintCounts
+    Shared user statistics dictionary.
+
+.PARAMETER PrinterPrintCounts
+    Shared printer statistics dictionary.
+
+.PARAMETER RecentJobs
+    Shared recent jobs queue.
+
+.PARAMETER WmiQueryInterval
+    WMI query polling interval in seconds.
+
+.PARAMETER SyncHash
+    Synchronized hashtable for cross-thread communication.
+
+.OUTPUTS
+    PSCustomObject containing runspace information and status.
+
+.EXAMPLE
+    $runspaceInfo = Start-ServerMonitorRunspace -ServerConfig $config -RunspacePool $pool -UserPrintCounts $userCounts -PrinterPrintCounts $printerCounts -RecentJobs $jobs -WmiQueryInterval 1 -SyncHash $syncHash
+#>
 function Start-ServerMonitorRunspace {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param(
-        [Parameter(Mandatory=$true)]$ServerConfig,
-        [Parameter(Mandatory=$true)]$RunspacePool,
-        [Parameter(Mandatory=$true)]$UserPrintCounts,
-        [Parameter(Mandatory=$true)]$PrinterPrintCounts,
-        [Parameter(Mandatory=$true)]$RecentJobs,
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [hashtable]$ServerConfig,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Management.Automation.Runspaces.RunspacePool]$RunspacePool,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$UserPrintCounts,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$PrinterPrintCounts,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$RecentJobs,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateRange(1, 60)]
         [int]$WmiQueryInterval,
-        [hashtable]$SyncHash 
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [hashtable]$SyncHash
     )
+
     $serverName = $ServerConfig.ServerName
-    Write-Host "Attempting to start monitoring for server: $serverName" -ForegroundColor Cyan
+    Write-Log -Message "Starting monitoring runspace for server: $serverName" -Level Information
+
     try {
         $powershell = [powershell]::Create()
-        $null = $powershell.AddScript($scriptBlock).AddParameters(@{
-            ServerName         = $serverName
-            UserPrintCounts    = $UserPrintCounts 
-            PrinterPrintCounts = $PrinterPrintCounts 
-            RecentJobs         = $RecentJobs      
-            WmiQueryInterval   = $WmiQueryInterval
-            SyncHash           = $SyncHash       
+        $null = $powershell.AddScript($script:MonitoringScriptBlock).AddParameters(@{
+            ServerName = $serverName
+            UserPrintCounts = $UserPrintCounts
+            PrinterPrintCounts = $PrinterPrintCounts
+            RecentJobs = $RecentJobs
+            WmiQueryInterval = $WmiQueryInterval
+            SyncHash = $SyncHash
         })
+
         $powershell.RunspacePool = $RunspacePool
         $handle = $powershell.BeginInvoke()
-        Write-Host "Successfully initiated monitoring for $serverName." -ForegroundColor Green
+
+        Write-Log -Message "Successfully started monitoring for server: $serverName" -Level Information
+
         return [PSCustomObject]@{
             PowerShell = $powershell
-            Handle     = $handle
+            Handle = $handle
             ServerName = $serverName
-            StartTime  = Get-Date
-            Status     = 'Running'
-            LastError  = $null
+            StartTime = Get-Date
+            Status = 'Running'
+            LastError = $null
         }
-    } catch {
-        Write-Error "Failed to start runspace for $serverName : $($_.Exception.Message)"
+    }
+    catch {
+        Write-Log -Message "Failed to start runspace for server '$serverName': $($_.Exception.Message)" -Level Error -ErrorRecord $_
+
         return [PSCustomObject]@{
             PowerShell = $null
-            Handle     = $null
+            Handle = $null
             ServerName = $serverName
-            StartTime  = Get-Date
-            Status     = 'FailedToStart'
-            LastError  = $_.Exception.Message
+            StartTime = Get-Date
+            Status = 'FailedToStart'
+            LastError = $_.Exception.Message
         }
     }
 }
 
-# Generate HTML only when needed
-function Update-HTMLIfNeeded {
-    param (
-        [datetime]$LastRefreshTime,
-        [int]$RefreshIntervalSeconds,
-        [string]$OutputFile,
-        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$UserCounts,
-        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$PrinterCounts,
-        [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$JobsQueue,
-        [string]$HtmlTemplatePath
+<#
+.SYNOPSIS
+    Monitors runspace health and restarts failed runspaces.
+
+.DESCRIPTION
+    Checks the status of all active runspaces and automatically restarts any that have failed or completed unexpectedly.
+
+.PARAMETER ActiveRunspaces
+    Hashtable of active runspace information objects.
+
+.PARAMETER ServerConfigs
+    Array of server configuration hashtables.
+
+.PARAMETER RunspacePool
+    The runspace pool.
+
+.PARAMETER UserPrintCounts
+    Shared user statistics dictionary.
+
+.PARAMETER PrinterPrintCounts
+    Shared printer statistics dictionary.
+
+.PARAMETER RecentJobs
+    Shared recent jobs queue.
+
+.PARAMETER WmiQueryInterval
+    WMI query polling interval.
+
+.PARAMETER SyncHash
+    Synchronized hashtable for communication.
+
+.EXAMPLE
+    Test-RunspaceHealth -ActiveRunspaces $activeRunspaces -ServerConfigs $serverConfigs -RunspacePool $pool -UserPrintCounts $userCounts -PrinterPrintCounts $printerCounts -RecentJobs $jobs -WmiQueryInterval 1 -SyncHash $syncHash
+#>
+function Test-RunspaceHealth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [hashtable]$ActiveRunspaces,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [hashtable[]]$ServerConfigs,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Management.Automation.Runspaces.RunspacePool]$RunspacePool,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$UserPrintCounts,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentDictionary[string,object]]$PrinterPrintCounts,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$RecentJobs,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateRange(1, 60)]
+        [int]$WmiQueryInterval,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [hashtable]$SyncHash
     )
-    $currentTime = Get-Date
-    if (($currentTime - $LastRefreshTime).TotalSeconds -ge $RefreshIntervalSeconds) {
-        Write-Verbose "Refresh interval reached. Generating HTML."
-        try {
-            $htmlContent = Build-HTMLContent -UserPrintCounts $UserCounts -PrinterPrintCounts $PrinterCounts -PrintJobs $JobsQueue -TemplatePath $HtmlTemplatePath
-            if (Safe-WriteToFile -Path $OutputFile -Content $htmlContent) {
-                Write-Verbose "HTML file '$OutputFile' updated successfully at $currentTime."
-                return $currentTime
-            } else {
-                 Write-Warning "Failed to write HTML file '$OutputFile' after retries."
-                return $LastRefreshTime
-            }
-        } catch {
-            Write-Error "Error generating or writing HTML: $($_.Exception.Message)"
-            return $LastRefreshTime
-        }
-    }
-    return $LastRefreshTime
-}
-#endregion
-#region Main Execution Loop
-$runspacePool = $null
-$activeRunspaces = @{}
-# Create a synchronized hashtable for cross-thread communication
-$syncHash = [hashtable]::Synchronized(@{})
-$syncHash.MessageQueue = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
-try {
-    Write-Host "Initializing Runspace Pool..." -ForegroundColor Green
-    # Since we only have one server, we just need 1 or 2 threads
-    $maxThreads = 2 
-    $runspacePool = [runspacefactory]::CreateRunspacePool(1, $maxThreads)
-    $runspacePool.Open()
-    Write-Host "Starting initial monitoring threads..." -ForegroundColor Green
-    foreach ($config in $serverConfigs) {
-        $runspaceInfo = Start-ServerMonitorRunspace -ServerConfig $config -RunspacePool $runspacePool -UserPrintCounts $userPrintCounts -PrinterPrintCounts $printerPrintCounts -RecentJobs $recentJobs -WmiQueryInterval $queryInterval -SyncHash $syncHash
-        $activeRunspaces[$config.ServerName] = $runspaceInfo
-    }
-    Write-Host "Monitoring started. Press Ctrl+C to stop." -ForegroundColor Green
 
-    while ($true) {
-        while ($syncHash.MessageQueue.Count -gt 0) {
-            $message = $null
-            if ($syncHash.MessageQueue.TryDequeue([ref]$message)) {
-                Write-Host $message.Message -ForegroundColor $message.Color
+    Write-Log -Message 'Checking runspace health status...' -Level Verbose
+
+    foreach ($serverName in @($ActiveRunspaces.Keys)) {
+        $runspaceInfo = $ActiveRunspaces[$serverName]
+
+        if ($runspaceInfo.Status -ne 'Running') {
+            continue
+        }
+
+        if ($runspaceInfo.Handle -and $runspaceInfo.Handle.IsCompleted) {
+            Write-Log -Message "Runspace for server '$serverName' completed unexpectedly." -Level Warning
+
+            try {
+                $null = $runspaceInfo.PowerShell.EndInvoke($runspaceInfo.Handle)
+                $runspaceInfo.Status = 'CompletedUnexpectedly'
+                Write-Log -Message "Runspace for '$serverName' ended without error (unexpected). Restarting..." -Level Warning
+            }
+            catch {
+                $runspaceInfo.Status = 'Failed'
+                $runspaceInfo.LastError = $_.Exception.Message
+                Write-Log -Message "Runspace for server '$serverName' failed: $($_.Exception.Message)" -Level Error -ErrorRecord $_
+            }
+            finally {
+                try { $runspaceInfo.PowerShell.Dispose() } catch { }
+                $runspaceInfo.PowerShell = $null
+                $runspaceInfo.Handle = $null
+            }
+
+            # Attempt restart
+            Write-Log -Message "Attempting to restart monitoring for server: $serverName" -Level Information
+
+            $serverConfig = $ServerConfigs | Where-Object { $_.ServerName -eq $serverName } | Select-Object -First 1
+
+            if ($serverConfig) {
+                $newRunspaceInfo = Start-ServerMonitorRunspace `
+                    -ServerConfig $serverConfig `
+                    -RunspacePool $RunspacePool `
+                    -UserPrintCounts $UserPrintCounts `
+                    -PrinterPrintCounts $PrinterPrintCounts `
+                    -RecentJobs $RecentJobs `
+                    -WmiQueryInterval $WmiQueryInterval `
+                    -SyncHash $SyncHash
+
+                $ActiveRunspaces[$serverName] = $newRunspaceInfo
+            }
+            else {
+                Write-Log -Message "Could not find configuration for server '$serverName' to restart monitoring." -Level Error
             }
         }
-        
-        $today = Get-Date -Format "yyyy-MM-dd"
-        if ($today -ne $currentDate) {
-            Write-Host "Date changed to $today. Stopping monitoring for log rotation." -ForegroundColor Yellow
-            break
-        }
-        if ((Get-Date) -ge $lastRunspaceCheck.AddSeconds($runspaceCheckInterval)) {
-             Write-Verbose "Checking runspace status..."
-             $serverNamesToCheck = $activeRunspaces.Keys | Get-Random -Count $activeRunspaces.Count
-             foreach ($serverName in $serverNamesToCheck) {
-                 $runspaceInfo = $activeRunspaces[$serverName]
-                 if ($runspaceInfo.Status -ne 'Running') { continue }
-                 if ($runspaceInfo.Handle -and $runspaceInfo.Handle.IsCompleted) {
-                    Write-Warning "Runspace for server '$serverName' completed unexpectedly."
-                    try {
-                        $null = $runspaceInfo.PowerShell.EndInvoke($runspaceInfo.Handle)
-                        Write-Warning "Runspace for '$serverName' completed without error? This shouldn't happen with the infinite loop. Restarting."
-                        $runspaceInfo.Status = 'CompletedUnexpectedly'
-                    } catch {
-                        Write-Error "Runspace for server '$serverName' failed. Error: $($_.Exception.Message)"
-                        $runspaceInfo.Status = 'Failed'
-                        $runspaceInfo.LastError = $_.Exception.Message
-                    } finally {
-                         try { $runspaceInfo.PowerShell.Dispose() } catch {}
-                         $runspaceInfo.PowerShell = $null
-                         $runspaceInfo.Handle = $null
-                     }
-                     Write-Host "Attempting to restart monitoring for $serverName..." -ForegroundColor Yellow
-                     $serverConfig = $serverConfigs | Where-Object { $_.ServerName -eq $serverName } | Select-Object -First 1
-                     if ($serverConfig) {
-                         $newRunspaceInfo = Start-ServerMonitorRunspace -ServerConfig $serverConfig -RunspacePool $runspacePool -UserPrintCounts $userPrintCounts -PrinterPrintCounts $printerPrintCounts -RecentJobs $recentJobs -WmiQueryInterval $queryInterval -SyncHash $syncHash
-                         $activeRunspaces[$serverName] = $newRunspaceInfo
-                     } else {
-                         Write-Warning "Could not find configuration for server $serverName to restart."
-                     }
-                 } 
-             }
-             $lastRunspaceCheck = Get-Date
-         }
-        
-        # Update HTML periodically
-        $script:lastHtmlRefresh = Update-HTMLIfNeeded -LastRefreshTime $script:lastHtmlRefresh -RefreshIntervalSeconds $htmlRefreshInterval -OutputFile $htmlFile -UserCounts $userPrintCounts -PrinterCounts $printerPrintCounts -JobsQueue $recentJobs -HtmlTemplatePath $htmlTemplatePath
-        
-        # Small sleep in the main loop to prevent high CPU usage
-        Start-Sleep -Milliseconds 100
     }
-} finally {
-    # --- Cleanup ---
-    Write-Host "Stopping monitoring and cleaning up resources..." -ForegroundColor Cyan
-    # Stop active runspaces using stop flags
-    if ($activeRunspaces) {
-        foreach ($serverName in $activeRunspaces.Keys) {
-            $runspaceInfo = $activeRunspaces[$serverName]
+}
+
+#endregion
+
+#region Main Execution
+
+<#
+.SYNOPSIS
+    Main execution function that orchestrates the print job monitoring.
+
+.DESCRIPTION
+    Initializes the monitoring infrastructure, starts runspaces for each server,
+    and manages the main monitoring loop with periodic HTML updates and runspace health checks.
+#>
+function Start-PrintJobMonitoring {
+    [CmdletBinding()]
+    param()
+
+    # Validate prerequisites
+    Write-Log -Message 'Validating prerequisites...' -Level Information
+
+    if (-not (Test-Path -Path $script:Config.HtmlTemplatePath -PathType Leaf)) {
+        Write-Log -Message "HTML template file not found: $($script:Config.HtmlTemplatePath)" -Level Error
+        throw "Required HTML template file not found: $($script:Config.HtmlTemplatePath)"
+    }
+
+    # Generate unique HTML filename
+    $script:Config.HtmlFile = Get-UniqueFileName -BaseName $script:HtmlFileBase -Extension 'html'
+
+    # Display configuration
+    Write-Log -Message '=== Print Job Monitor Starting ===' -Level Information
+    Write-Log -Message "Monitoring Servers:" -Level Information
+    foreach ($config in $script:Config.ServerConfigs) {
+        Write-Log -Message "  - $($config.ServerName) ($($config.Description))" -Level Information
+    }
+    Write-Log -Message "Output Directory: $($script:Config.OutputDirectory)" -Level Information
+    Write-Log -Message "HTML Template: $($script:Config.HtmlTemplatePath)" -Level Information
+    Write-Log -Message "HTML Report File: $($script:Config.HtmlFile)" -Level Information
+    Write-Log -Message "Log Level: $($script:Config.LogLevel)" -Level Information
+
+    try {
+        # Initialize runspace pool
+        Write-Log -Message "Initializing runspace pool with $($script:Config.MaxConcurrentThreads) threads..." -Level Information
+
+        $script:RunspacePool = [runspacefactory]::CreateRunspacePool(1, $script:Config.MaxConcurrentThreads)
+        $script:RunspacePool.Open()
+
+        # Start monitoring for each server
+        Write-Log -Message 'Starting monitoring threads for configured servers...' -Level Information
+
+        foreach ($serverConfig in $script:Config.ServerConfigs) {
+            $runspaceInfo = Start-ServerMonitorRunspace `
+                -ServerConfig $serverConfig `
+                -RunspacePool $script:RunspacePool `
+                -UserPrintCounts $script:UserPrintCounts `
+                -PrinterPrintCounts $script:PrinterPrintCounts `
+                -RecentJobs $script:RecentJobs `
+                -WmiQueryInterval $script:Config.WmiQueryInterval `
+                -SyncHash $script:SyncHash
+
+            $script:ActiveRunspaces[$serverConfig.ServerName] = $runspaceInfo
+        }
+
+        Write-Log -Message 'All monitoring threads started successfully. Press Ctrl+C to stop.' -Level Information
+
+        # Main monitoring loop
+        while ($true) {
+            try {
+                # Process messages from background threads
+                while ($script:SyncHash.MessageQueue.Count -gt 0) {
+                    $message = $null
+                    if ($script:SyncHash.MessageQueue.TryDequeue([ref]$message)) {
+                        Write-Log -Message $message.Message -Level Information
+                    }
+                }
+
+                # Check for date change (log rotation)
+                $today = Get-Date -Format 'yyyy-MM-dd'
+                if ($today -ne $script:Config.CurrentDate) {
+                    Write-Log -Message "Date changed to $today. Stopping monitoring for log rotation." -Level Warning
+                    break
+                }
+
+                # Periodic runspace health check
+                if ((Get-Date) -ge $script:Config.LastRunspaceCheck.AddSeconds($script:Config.RunspaceCheckInterval)) {
+                    Test-RunspaceHealth `
+                        -ActiveRunspaces $script:ActiveRunspaces `
+                        -ServerConfigs $script:Config.ServerConfigs `
+                        -RunspacePool $script:RunspacePool `
+                        -UserPrintCounts $script:UserPrintCounts `
+                        -PrinterPrintCounts $script:PrinterPrintCounts `
+                        -RecentJobs $script:RecentJobs `
+                        -WmiQueryInterval $script:Config.WmiQueryInterval `
+                        -SyncHash $script:SyncHash
+
+                    $script:Config.LastRunspaceCheck = Get-Date
+                }
+
+                # Periodic HTML update
+                $script:Config.LastHtmlRefresh = Update-HtmlIfNeeded `
+                    -LastRefreshTime $script:Config.LastHtmlRefresh `
+                    -RefreshIntervalSeconds $script:Config.HtmlRefreshInterval `
+                    -OutputFile $script:Config.HtmlFile `
+                    -UserCounts $script:UserPrintCounts `
+                    -PrinterCounts $script:PrinterPrintCounts `
+                    -JobsQueue $script:RecentJobs `
+                    -HtmlTemplatePath $script:Config.HtmlTemplatePath
+
+                # Sleep to prevent high CPU usage
+                Start-Sleep -Milliseconds 100
+            }
+            catch {
+                # Log errors in the monitoring loop but don't exit
+                Write-Log -Message "Error in monitoring loop: $($_.Exception.Message)" -Level Error
+                Write-Log -Message "Stack trace: $($_.ScriptStackTrace)" -Level Verbose
+
+                # Sleep before continuing to prevent rapid error loops
+                Start-Sleep -Seconds 1
+            }
+        }
+    }
+    finally {
+        # Cleanup
+        Write-Log -Message 'Stopping monitoring and cleaning up resources...' -Level Information
+
+        # Stop all active runspaces
+        foreach ($serverName in @($script:ActiveRunspaces.Keys)) {
+            $runspaceInfo = $script:ActiveRunspaces[$serverName]
+
             if ($runspaceInfo.PowerShell -and $runspaceInfo.Status -eq 'Running') {
-                Write-Host "Stopping runspace for $serverName..."
-                # Signal the runspace to stop via the event mechanism
-                try { 
-                    New-Event -SourceIdentifier "StopRunspace-$serverName" -EventArguments @() | Out-Null 
-                    
-                    # Also directly set the stop flag if possible
-                    $stopFlagRef = $syncHash["StopFlag-$serverName"]
+                Write-Log -Message "Stopping runspace for server: $serverName" -Level Information
+
+                try {
+                    # Signal stop via event
+                    New-Event -SourceIdentifier "StopRunspace-$serverName" -EventArguments @() | Out-Null
+
+                    # Set stop flag directly
+                    $stopFlagRef = $script:SyncHash["StopFlag-$serverName"]
                     if ($stopFlagRef) {
                         $stopFlagRef.Value = $true
-                        Write-Host "Stop flag for $serverName has been set." -ForegroundColor Cyan
+                        Write-Log -Message "Stop flag set for server: $serverName" -Level Verbose
                     }
-                } catch {
-                    Write-Warning "Error triggering stop event for $serverName : $($_.Exception.Message)"
                 }
-                
-                # Give it a moment to stop gracefully
+                catch {
+                    Write-Log -Message "Error triggering stop event for '$serverName': $($_.Exception.Message)" -Level Warning
+                }
+
+                # Allow graceful shutdown
                 Start-Sleep -Seconds 2
-                
+
                 # Force stop if still running
                 try {
                     if (-not $runspaceInfo.Handle.IsCompleted) {
-                        Write-Host "Forcefully stopping runspace for $serverName..." -ForegroundColor Yellow
+                        Write-Log -Message "Forcefully stopping runspace for server: $serverName" -Level Warning
                         $runspaceInfo.PowerShell.Stop()
-                    } else {
-                        Write-Host "Runspace for $serverName completed gracefully." -ForegroundColor Green
                     }
-                } catch { 
-                    Write-Warning "Error stopping PowerShell object for $serverName : $($_.Exception.Message)"
+                    else {
+                        Write-Log -Message "Runspace for '$serverName' stopped gracefully." -Level Information
+                    }
+                }
+                catch {
+                    Write-Log -Message "Error stopping PowerShell for '$serverName': $($_.Exception.Message)" -Level Warning
                 }
             }
-            
-            # Clean up and dispose regardless of stop success
-            try { 
+
+            # Dispose resources
+            try {
                 if ($runspaceInfo.PowerShell) {
                     if ($runspaceInfo.Handle -and -not $runspaceInfo.Handle.IsCompleted) {
-                        # Try to end the invoke if still running
-                        try { $null = $runspaceInfo.PowerShell.EndInvoke($runspaceInfo.Handle) } catch {}
+                        try { $null = $runspaceInfo.PowerShell.EndInvoke($runspaceInfo.Handle) } catch { }
                     }
-                    $runspaceInfo.PowerShell.Dispose() 
+                    $runspaceInfo.PowerShell.Dispose()
                 }
-            } catch {
-                Write-Warning "Error disposing PowerShell object for $serverName : $($_.Exception.Message)"
+            }
+            catch {
+                Write-Log -Message "Error disposing PowerShell for '$serverName': $($_.Exception.Message)" -Level Warning
             }
         }
-    }
-    
-    # Clean up stop flags
-    foreach ($key in @($syncHash.Keys)) {
-        if ($key.StartsWith("StopFlag-")) {
-            try {
-                $syncHash.Remove($key)
-            } catch {
-                Write-Warning "Error removing stop flag for $key : $($_.Exception.Message)"
+
+        # Clean up stop flags
+        foreach ($key in @($script:SyncHash.Keys)) {
+            if ($key.StartsWith('StopFlag-')) {
+                try {
+                    $script:SyncHash.Remove($key)
+                }
+                catch {
+                    Write-Log -Message "Error removing stop flag '$key': $($_.Exception.Message)" -Level Warning
+                }
             }
         }
-    }
-    
-    # Close the runspace pool
-    if ($runspacePool) {
-        Write-Host "Closing runspace pool..."
-        try { $runspacePool.Close() } catch {Write-Warning "Error closing runspace pool: $($_.Exception.Message)"}
-        try { $runspacePool.Dispose()} catch {Write-Warning "Error disposing runspace pool: $($_.Exception.Message)"}
-    }
-    
-    # Generate final HTML output
-    try {
-        Write-Host "Generating final HTML report..." -ForegroundColor Cyan
-        $htmlContent = Build-HTMLContent -UserPrintCounts $userPrintCounts -PrinterPrintCounts $printerPrintCounts -PrintJobs $recentJobs -TemplatePath $htmlTemplatePath
-        if (Safe-WriteToFile -Path $htmlFile -Content $htmlContent) {
-            Write-Host "Final HTML report generated successfully: $htmlFile" -ForegroundColor Green
+
+        # Close runspace pool
+        if ($script:RunspacePool) {
+            Write-Log -Message 'Closing runspace pool...' -Level Information
+            try { $script:RunspacePool.Close() } catch { Write-Log -Message "Error closing runspace pool: $($_.Exception.Message)" -Level Warning }
+            try { $script:RunspacePool.Dispose() } catch { Write-Log -Message "Error disposing runspace pool: $($_.Exception.Message)" -Level Warning }
         }
-    } catch {
-        Write-Warning "Error generating final HTML report: $($_.Exception.Message)"
+
+        # Generate final HTML report
+        try {
+            Write-Log -Message 'Generating final HTML report...' -Level Information
+
+            $htmlContent = Build-HtmlContent `
+                -UserPrintCounts $script:UserPrintCounts `
+                -PrinterPrintCounts $script:PrinterPrintCounts `
+                -PrintJobs $script:RecentJobs `
+                -TemplatePath $script:Config.HtmlTemplatePath
+
+            if (Write-FileWithRetry -Path $script:Config.HtmlFile -Content $htmlContent) {
+                Write-Log -Message "Final HTML report generated: $($script:Config.HtmlFile)" -Level Information
+            }
+        }
+        catch {
+            # Don't use -ErrorRecord here to avoid recursive error logging
+            Write-Warning "Error generating final HTML report: $($_.Exception.Message)"
+        }
+
+        Write-Log -Message '=== Print Job Monitor Stopped ===' -Level Information
     }
-    
-    Write-Host "Monitoring stopped." -ForegroundColor Green
 }
+
+#endregion
+
+#region Script Entry Point
+
+# Start monitoring
+try {
+    Start-PrintJobMonitoring
+}
+catch {
+    Write-Error "Fatal error in print job monitoring: $($_.Exception.Message)"
+    exit 1
+}
+
 #endregion
